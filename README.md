@@ -1,6 +1,10 @@
 # PONTE SEO改善アプリ
 
-URLを1つ入力すると、次の処理を自動実行するStreamlitアプリです。
+登録済みの3サイトから1つ選ぶと、次の処理を自動実行するStreamlitアプリです。
+
+- ぽんて鍼灸整骨院（https://ponte-nene.jp/）
+- ぽんてアロマサロン（https://ponte-aroma.jp/）
+- ぽんておすすめブログ（https://ponte-nene.net/）
 
 1. Search Console・GA4からダウンロードしたCSV／Excelを読み込み
 2. 最大15ページの公開HTMLを技術SEO監査
@@ -36,7 +40,7 @@ Excelはクエリ・ページなど複数のシートを一度に読み込める
 4. 分析期間をSearch Consoleと同じ期間にする
 5. 右上の共有アイコンから「ファイルをダウンロード」→「CSVをダウンロード」を選ぶ
 
-アプリのサイドバーで、Search ConsoleとGA4のファイルを選びます。その後、サイトURLを入力して「分析する」を押してください。
+アプリのサイドバーで、Search ConsoleとGA4のファイルを選びます。その後、3サイトから分析対象を選んで「分析する」を押してください。URLの手入力は不要です。
 
 ## 5. Gemini APIキー
 

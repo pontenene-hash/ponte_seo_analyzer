@@ -30,6 +30,11 @@ st.markdown(CSS, unsafe_allow_html=True)
 
 DEFAULT_MODEL = "gemini-2.5-flash"
 UA = "PONTE-SEO-Analyzer/1.0 (+website quality audit)"
+SITE_OPTIONS = {
+    "ぽんて鍼灸整骨院": "https://ponte-nene.jp/",
+    "ぽんてアロマサロン": "https://ponte-aroma.jp/",
+    "ぽんておすすめブログ": "https://ponte-nene.net/",
+}
 
 
 def secret(name: str, default=""):
@@ -359,7 +364,12 @@ with st.sidebar:
 st.title("PONTE SEO改善アプリ")
 st.markdown('<p class="subtle">サイトの実測データから、改善案とリライト原稿をまとめて作成します。</p>', unsafe_allow_html=True)
 
-url_input = st.text_input("特定のサイトのURL", placeholder="https://ponte-nene.jp", label_visibility="collapsed")
+selected_site = st.selectbox(
+    "分析するサイト",
+    options=list(SITE_OPTIONS),
+    format_func=lambda name: f"{name}（{urlparse(SITE_OPTIONS[name]).netloc}）",
+)
+url_input = SITE_OPTIONS[selected_site]
 analyze = st.button("分析する", type="primary", use_container_width=True)
 
 if analyze:
