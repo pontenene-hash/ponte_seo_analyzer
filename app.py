@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import io
 import json
 import re
 import time
-from datetime import date, timedelta
 from urllib.parse import urljoin, urlparse
 
 import pandas as pd
@@ -11,10 +11,6 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 from google import genai
-from google.analytics.data_v1beta import BetaAnalyticsDataClient
-from google.analytics.data_v1beta.types import DateRange, Dimension, Metric, RunReportRequest
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
 
 
 st.set_page_config(page_title="PONTE SEO改善アプリ", page_icon="📈", layout="wide")
@@ -55,103 +51,134 @@ def normalize_url(value: str) -> str:
     return value.rstrip("/") + "/"
 
 
-def credential_info(uploaded_file, pasted_json: str):
-    raw = uploaded_file.getvalue().decode("utf-8") if uploaded_file else pasted_json
-    if not raw:
-        raw = secret("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-    if isinstance(raw, dict):
-        return raw
-    return json.loads(raw) if raw else None
+def _clean_name(value) -> str:
+    return re.sub(r"[\s_　]+", " ", str(value).replace("\ufeff", "").strip().lower())
 
 
-def make_credentials(info):
-    if not info:
-        return None
-    scopes = [
-        "https://www.googleapis.com/auth/webmasters.readonly",
-        "https://www.googleapis.com/auth/analytics.readonly",
-    ]
-    return service_account.Credentials.from_service_account_info(info, scopes=scopes)
+def _read_csv_bytes(raw: bytes) -> pd.DataFrame:
+    last_error = None
+    for encoding in ("utf-8-sig", "cp932", "shift_jis", "utf-16"):
+        try:
+            text = raw.decode(encoding)
+            lines = text.splitlines()
+            keywords = ("クリック", "表示回数", "clicks", "impressions", "セッション", "sessions",
+                        "ランディング", "landing page", "クエリ", "query", "ページ", "page")
+            scores = [sum(word in _clean_name(line) for word in keywords) for line in lines[:30]]
+            header_row = scores.index(max(scores)) if scores and max(scores) else 0
+            return pd.read_csv(io.StringIO("\n".join(lines[header_row:])), on_bad_lines="skip")
+        except Exception as exc:
+            last_error = exc
+    raise ValueError(f"CSVを読み取れませんでした: {last_error}")
 
 
-def property_map_from_settings(text: str) -> dict:
-    if not text:
-        stored = secret("GA4_PROPERTY_MAP", {})
-        if isinstance(stored, dict):
-            return dict(stored)
-        text = str(stored)
-    if not text:
-        return {}
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        result = {}
-        for line in text.splitlines():
-            if "=" in line:
-                host, prop = line.split("=", 1)
-                result[host.strip()] = prop.strip()
-        return result
+def _find_header_row(preview: pd.DataFrame) -> int:
+    keywords = ("クリック", "表示回数", "clicks", "impressions", "セッション", "sessions",
+                "ランディング", "landing page", "クエリ", "query", "ページ", "page")
+    best_row, best_score = 0, 0
+    for index, row in preview.iterrows():
+        values = " | ".join(_clean_name(x) for x in row.tolist() if pd.notna(x))
+        score = sum(word in values for word in keywords)
+        if score > best_score:
+            best_row, best_score = int(index), score
+    return best_row
 
 
-def resolve_ga_property(url: str, mapping: dict, direct: str) -> str:
-    if direct.strip():
-        return direct.strip().replace("properties/", "")
-    host = urlparse(url).netloc.lower().removeprefix("www.")
-    return str(mapping.get(host, "")).replace("properties/", "")
+def read_uploaded_tables(uploaded_files) -> list[tuple[str, pd.DataFrame]]:
+    tables = []
+    for uploaded in uploaded_files or []:
+        raw = uploaded.getvalue()
+        lower_name = uploaded.name.lower()
+        if lower_name.endswith(".csv"):
+            tables.append((uploaded.name, _read_csv_bytes(raw)))
+        else:
+            book = pd.ExcelFile(io.BytesIO(raw))
+            for sheet in book.sheet_names:
+                preview = pd.read_excel(book, sheet_name=sheet, header=None, nrows=25)
+                header_row = _find_header_row(preview)
+                frame = pd.read_excel(book, sheet_name=sheet, skiprows=header_row)
+                if not frame.dropna(how="all").empty:
+                    tables.append((f"{uploaded.name} / {sheet}", frame))
+    return tables
 
 
-def resolve_gsc_property(service, url: str) -> str:
-    host = urlparse(url).netloc.lower().removeprefix("www.")
-    candidates = [url, url.rstrip("/"), f"sc-domain:{host}"]
-    sites = service.sites().list().execute().get("siteEntry", [])
-    allowed = {x["siteUrl"] for x in sites if x.get("permissionLevel") not in (None, "siteUnverifiedUser")}
-    for candidate in candidates:
-        if candidate in allowed:
-            return candidate
-    for site in allowed:
-        if site.startswith("sc-domain:") and site.split(":", 1)[1].removeprefix("www.") == host:
-            return site
-        if urlparse(site).netloc.lower().removeprefix("www.") == host:
-            return site
-    raise PermissionError(f"Search Consoleで {host} の閲覧権限が見つかりません。")
+def _find_column(df: pd.DataFrame, aliases: tuple[str, ...]):
+    normalized = {_clean_name(col): col for col in df.columns}
+    for alias in aliases:
+        target = _clean_name(alias)
+        if target in normalized:
+            return normalized[target]
+    for clean, original in normalized.items():
+        if any(_clean_name(alias) in clean for alias in aliases):
+            return original
+    return None
 
 
-def fetch_gsc(credentials, url: str) -> pd.DataFrame:
-    service = build("searchconsole", "v1", credentials=credentials, cache_discovery=False)
-    site_url = resolve_gsc_property(service, url)
-    end = date.today() - timedelta(days=3)
-    start = end - timedelta(days=89)
-    body = {
-        "startDate": start.isoformat(), "endDate": end.isoformat(),
-        "dimensions": ["query", "page"], "rowLimit": 1000,
-        "dataState": "final",
+def _number_series(series: pd.Series, percent=False) -> pd.Series:
+    text = series.astype(str).str.replace(",", "", regex=False).str.replace("%", "", regex=False)
+    values = pd.to_numeric(text, errors="coerce").fillna(0)
+    if percent and values.max() > 1:
+        values = values / 100
+    return values
+
+
+def normalize_gsc_files(uploaded_files) -> tuple[pd.DataFrame, list[str]]:
+    output, notes = [], []
+    aliases = {
+        "query": ("query", "queries", "top queries", "クエリ", "検索キーワード", "上位のクエリ"),
+        "page": ("page", "pages", "top pages", "ページ", "上位のページ"),
+        "clicks": ("clicks", "クリック数", "クリック"),
+        "impressions": ("impressions", "表示回数"),
+        "ctr": ("ctr", "平均ctr"),
+        "position": ("position", "average position", "掲載順位", "平均掲載順位"),
     }
-    rows = service.searchanalytics().query(siteUrl=site_url, body=body).execute().get("rows", [])
-    return pd.DataFrame([{
-        "query": r["keys"][0], "page": r["keys"][1], "clicks": r.get("clicks", 0),
-        "impressions": r.get("impressions", 0), "ctr": r.get("ctr", 0), "position": r.get("position", 0)
-    } for r in rows])
+    for source, frame in read_uploaded_tables(uploaded_files):
+        frame = frame.dropna(how="all").copy()
+        found = {name: _find_column(frame, options) for name, options in aliases.items()}
+        if not found["clicks"] and not found["impressions"]:
+            continue
+        clean = pd.DataFrame(index=frame.index)
+        clean["query"] = frame[found["query"]].fillna("").astype(str) if found["query"] else ""
+        clean["page"] = frame[found["page"]].fillna("").astype(str) if found["page"] else ""
+        for metric in ("clicks", "impressions", "ctr", "position"):
+            clean[metric] = _number_series(frame[found[metric]], percent=metric == "ctr") if found[metric] else 0
+        clean["source"] = source
+        output.append(clean)
+    if not output:
+        if uploaded_files:
+            notes.append("Search Consoleファイル内に、クリック数・表示回数の列を見つけられませんでした。")
+        return pd.DataFrame(columns=["query", "page", "clicks", "impressions", "ctr", "position", "source"]), notes
+    result = pd.concat(output, ignore_index=True)
+    result = result[(result["query"] != "") | (result["page"] != "")]
+    return result, notes
 
 
-def fetch_ga4(credentials, property_id: str) -> pd.DataFrame:
-    if not property_id:
-        raise ValueError("このドメインのGA4プロパティIDが未設定です。")
-    client = BetaAnalyticsDataClient(credentials=credentials)
-    request = RunReportRequest(
-        property=f"properties/{property_id}",
-        dimensions=[Dimension(name="landingPagePlusQueryString")],
-        metrics=[Metric(name="sessions"), Metric(name="activeUsers"), Metric(name="engagementRate"), Metric(name="keyEvents")],
-        date_ranges=[DateRange(start_date="90daysAgo", end_date="yesterday")],
-        limit=1000,
-    )
-    response = client.run_report(request)
-    return pd.DataFrame([{
-        "landing_page": r.dimension_values[0].value,
-        "sessions": int(float(r.metric_values[0].value or 0)),
-        "active_users": int(float(r.metric_values[1].value or 0)),
-        "engagement_rate": float(r.metric_values[2].value or 0),
-        "key_events": float(r.metric_values[3].value or 0),
-    } for r in response.rows])
+def normalize_ga4_files(uploaded_files) -> tuple[pd.DataFrame, list[str]]:
+    output, notes = [], []
+    aliases = {
+        "landing_page": ("landing page + query string", "landing page", "ランディング ページ + クエリ文字列", "ランディングページ"),
+        "sessions": ("sessions", "セッション"),
+        "active_users": ("active users", "アクティブ ユーザー", "アクティブユーザー数", "ユーザー"),
+        "engagement_rate": ("engagement rate", "エンゲージメント率"),
+        "key_events": ("key events", "キーイベント", "コンバージョン"),
+    }
+    for source, frame in read_uploaded_tables(uploaded_files):
+        frame = frame.dropna(how="all").copy()
+        found = {name: _find_column(frame, options) for name, options in aliases.items()}
+        if not found["landing_page"] or not found["sessions"]:
+            continue
+        clean = pd.DataFrame(index=frame.index)
+        clean["landing_page"] = frame[found["landing_page"]].fillna("").astype(str)
+        for metric in ("sessions", "active_users", "engagement_rate", "key_events"):
+            clean[metric] = _number_series(frame[found[metric]], percent=metric == "engagement_rate") if found[metric] else 0
+        clean["source"] = source
+        output.append(clean)
+    if not output:
+        if uploaded_files:
+            notes.append("GA4ファイル内に、ランディングページ・セッションの列を見つけられませんでした。")
+        return pd.DataFrame(columns=["landing_page", "sessions", "active_users", "engagement_rate", "key_events", "source"]), notes
+    result = pd.concat(output, ignore_index=True)
+    result = result[result["landing_page"] != ""]
+    return result, notes
 
 
 def get_html(url: str, timeout=15):
@@ -243,7 +270,7 @@ def build_prompt(url: str, crawl: list[dict], gsc: pd.DataFrame, ga4: pd.DataFra
         gsc_low_ctr = compact_records(candidates, "impressions", 80)
     data = {
         "target_url": url,
-        "period": "直近90日（GSCは確定データのため3日前まで）",
+        "period": "ユーザーがGoogle画面からダウンロードしたファイルの集計期間",
         "public_page_audit": crawl,
         "gsc_low_ctr_opportunities": gsc_low_ctr,
         "gsc_top": compact_records(gsc, "clicks", 80),
@@ -309,12 +336,25 @@ with st.sidebar:
     api_key = st.text_input("Gemini APIキー", value=secret("GEMINI_API_KEY", ""), type="password")
     model = st.text_input("Geminiモデル", value=secret("GEMINI_MODEL", DEFAULT_MODEL))
     st.divider()
-    st.caption("Googleデータ連携（任意・推奨）")
-    credential_file = st.file_uploader("サービスアカウントJSON", type=["json"])
-    credential_json = st.text_area("またはJSONを貼り付け", value="", height=90)
-    ga_property = st.text_input("GA4プロパティID（今回だけ）", value="")
-    ga_map_text = st.text_area("ドメイン別GA4設定", value="", placeholder='ponte-nene.jp=123456789\nponte-aroma.jp=987654321')
-    st.caption("Secrets設定済みなら、ここへの毎回入力は不要です。")
+    st.subheader("分析データ")
+    gsc_files = st.file_uploader(
+        "Search Consoleデータ",
+        type=["csv", "xlsx", "xls"],
+        accept_multiple_files=True,
+        help="検索パフォーマンスからダウンロードしたCSVまたはExcelを選択します。複数ファイルも選べます。",
+    )
+    ga4_files = st.file_uploader(
+        "Googleアナリティクス（GA4）データ",
+        type=["csv", "xlsx", "xls"],
+        accept_multiple_files=True,
+        help="ランディングページのレポートをCSVまたはExcelで選択します。",
+    )
+    st.caption("Googleの管理者権限やサービスアカウントは不要です。")
+    with st.expander("ダウンロードするデータ"):
+        st.markdown(
+            "**Search Console**：検索結果のパフォーマンスで期間を指定し、右上の「エクスポート」からExcelがおすすめです。  \n"
+            "**GA4**：レポート → エンゲージメント → ランディングページで、右上の共有アイコンからCSVをダウンロードします。"
+        )
 
 st.title("PONTE SEO改善アプリ")
 st.markdown('<p class="subtle">サイトの実測データから、改善案とリライト原稿をまとめて作成します。</p>', unsafe_allow_html=True)
@@ -331,28 +371,20 @@ if analyze:
 
         progress = st.progress(0, text="公開ページを確認しています…")
         crawl = crawl_site(url)
-        progress.progress(30, text="Googleデータを確認しています…")
+        progress.progress(30, text="アップロードデータを読み込んでいます…")
 
-        gsc_df, ga4_df = pd.DataFrame(), pd.DataFrame()
         warnings = []
         try:
-            info = credential_info(credential_file, credential_json)
-            credentials = make_credentials(info)
-            if credentials:
-                try:
-                    gsc_df = fetch_gsc(credentials, url)
-                except Exception as exc:
-                    warnings.append(f"Search Console: {exc}")
-                try:
-                    mapping = property_map_from_settings(ga_map_text)
-                    prop = resolve_ga_property(url, mapping, ga_property)
-                    ga4_df = fetch_ga4(credentials, prop)
-                except Exception as exc:
-                    warnings.append(f"GA4: {exc}")
-            else:
-                warnings.append("Google認証が未設定のため、公開ページのみ分析しました。")
+            gsc_df, gsc_notes = normalize_gsc_files(gsc_files)
+            ga4_df, ga4_notes = normalize_ga4_files(ga4_files)
+            warnings.extend(gsc_notes + ga4_notes)
         except Exception as exc:
-            warnings.append(f"Google認証情報を読み取れませんでした: {exc}")
+            gsc_df, ga4_df = pd.DataFrame(), pd.DataFrame()
+            warnings.append(f"アップロードデータを読み取れませんでした: {exc}")
+        if gsc_df.empty:
+            warnings.append("Search Consoleデータがないため、その部分は公開ページ情報だけで分析しました。")
+        if ga4_df.empty:
+            warnings.append("GA4データがないため、その部分は公開ページ情報だけで分析しました。")
 
         progress.progress(60, text="SEO課題と改善優先度を分析しています…")
         prompt = build_prompt(url, crawl, gsc_df, ga4_df)
@@ -411,4 +443,4 @@ if analyze:
         st.download_button("レポートをダウンロード", output.encode("utf-8-sig"), "seo_improvement_report.md", "text/markdown", use_container_width=True)
     except Exception as exc:
         st.error(f"分析を完了できませんでした: {exc}")
-        st.caption("URL、APIキー、Google APIの有効化、権限設定をご確認ください。")
+        st.caption("URL、Gemini APIキー、アップロードしたファイル形式をご確認ください。")

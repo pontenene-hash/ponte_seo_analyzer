@@ -2,11 +2,11 @@
 
 URLを1つ入力すると、次の処理を自動実行するStreamlitアプリです。
 
-1. Search Console・GA4の直近90日データを取得
+1. Search Console・GA4からダウンロードしたCSV／Excelを読み込み
 2. 最大15ページの公開HTMLを技術SEO監査
 3. Geminiが改善優先度、リライト対象、構成、完成本文、30日計画を作成
 
-Google連携が未設定・取得失敗の場合も、公開ページのSEO監査だけで分析を続行します。
+Googleの管理者権限、サービスアカウント、Google Cloud設定は不要です。データをアップロードしない場合も、公開ページのSEO監査だけで分析を続行します。
 
 ## 1. GitHubへアップロード
 
@@ -17,18 +17,28 @@ Google連携が未設定・取得失敗の場合も、公開ページのSEO監�
 - Main file path: `app.py`
 - Advanced settings > Secrets: `secrets.toml.example`を参考に、本物の値を設定
 
-## 3. Google側の初回設定
+## 3. Search Consoleデータの準備
 
-1. Google Cloudで「Google Search Console API」と「Google Analytics Data API」を有効化
-2. サービスアカウントを作り、JSONキーを取得
-3. JSON内の`client_email`をコピー
-4. Search Consoleの各プロパティで、そのメールアドレスを閲覧ユーザーとして追加
-5. GA4の「管理 > プロパティのアクセス管理」で、そのメールアドレスを閲覧者として追加
-6. 各GA4プロパティIDをStreamlit Secretsの`GA4_PROPERTY_MAP`へ登録
+1. Search Consoleを開く
+2. 左上で分析したいサイトを選ぶ
+3. 「検索結果」または「検索パフォーマンス」を開く
+4. 期間を「過去3か月」などに設定
+5. 右上の「エクスポート」を押す
+6. 「Excelをダウンロード」または「CSVをダウンロード」を選ぶ
 
-以後はトップ画面にURLを入れ、「分析する」を押すだけです。
+Excelはクエリ・ページなど複数のシートを一度に読み込めるためおすすめです。CSVを使う場合は、クエリとページの両方をアップロードすると分析精度が上がります。
 
-## 4. Gemini APIキー
+## 4. GA4データの準備
+
+1. Googleアナリティクスを開く
+2. 分析したいプロパティを選ぶ
+3. 「レポート」→「エンゲージメント」→「ランディングページ」を開く
+4. 分析期間をSearch Consoleと同じ期間にする
+5. 右上の共有アイコンから「ファイルをダウンロード」→「CSVをダウンロード」を選ぶ
+
+アプリのサイドバーで、Search ConsoleとGA4のファイルを選びます。その後、サイトURLを入力して「分析する」を押してください。
+
+## 5. Gemini APIキー
 
 Google AI StudioでAPIキーを発行し、Streamlit Secretsの`GEMINI_API_KEY`へ設定します。料金・無料枠・利用上限はGoogle側の最新表示を確認してください。
 
@@ -45,8 +55,7 @@ macOS/Linuxでは有効化コマンドを`source .venv/bin/activate`へ変更し
 
 ## 安全上の注意
 
-- サービスアカウントJSONやAPIキーをGitHubへ直接アップロードしないでください。
+- Gemini APIキーをGitHubへ直接アップロードしないでください。
 - 公開アプリではサイドバー入力よりStreamlit Secretsを推奨します。
 - 医療・健康記事はAI原稿をそのまま公開せず、施術者が事実確認してください。
-- Search Console APIは仕様上、すべての行を返すとは限りません。
-
+- ダウンロードした期間・行数が分析範囲になります。Search ConsoleとGA4は同じ期間に揃えるのがおすすめです。
