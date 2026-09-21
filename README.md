@@ -46,6 +46,8 @@ Excelはクエリ・ページなど複数のシートを一度に読み込める
 
 Google AI StudioでAPIキーを発行し、Streamlit Secretsの`GEMINI_API_KEY`へ設定します。料金・無料枠・利用上限はGoogle側の最新表示を確認してください。
 
+モデルは`gemini-3.6-flash`を使用します。以前のSecretsに`gemini-2.5-flash`が残っていても、アプリが自動的に新しいモデルへ切り替えます。
+
 ## ローカル起動
 
 ```bash

@@ -28,7 +28,8 @@ CSS = """
 """
 st.markdown(CSS, unsafe_allow_html=True)
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3.6-flash"
+RETIRED_MODELS = {"gemini-2.5-flash", "models/gemini-2.5-flash"}
 UA = "PONTE-SEO-Analyzer/1.0 (+website quality audit)"
 SITE_OPTIONS = {
     "ぽんて鍼灸整骨院": "https://ponte-nene.jp/",
@@ -339,7 +340,10 @@ def markdown_report(url: str, report: dict) -> str:
 with st.sidebar:
     st.header("初回設定")
     api_key = st.text_input("Gemini APIキー", value=secret("GEMINI_API_KEY", ""), type="password")
-    model = st.text_input("Geminiモデル", value=secret("GEMINI_MODEL", DEFAULT_MODEL))
+    configured_model = str(secret("GEMINI_MODEL", DEFAULT_MODEL)).strip()
+    if configured_model in RETIRED_MODELS:
+        configured_model = DEFAULT_MODEL
+    model = st.text_input("Geminiモデル", value=configured_model)
     st.divider()
     st.subheader("分析データ")
     gsc_files = st.file_uploader(
