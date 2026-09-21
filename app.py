@@ -36,6 +36,10 @@ SITE_OPTIONS = {
     "ぽんてアロマサロン": "https://ponte-aroma.jp/",
     "ぽんておすすめブログ": "https://ponte-nene.net/",
 }
+GBP_PROFILE_NAMES = {
+    "ぽんて鍼灸整骨院": "ぽんて鍼灸整骨院／ぽんてカイロプラクティックオフィス",
+    "ぽんてアロマサロン": "Ponte Aroma Salon",
+}
 
 
 def secret(name: str, default=""):
@@ -68,7 +72,9 @@ def _read_csv_bytes(raw: bytes) -> pd.DataFrame:
             text = raw.decode(encoding)
             lines = text.splitlines()
             keywords = ("クリック", "表示回数", "clicks", "impressions", "セッション", "sessions",
-                        "ランディング", "landing page", "クエリ", "query", "ページ", "page")
+                        "ランディング", "landing page", "クエリ", "query", "ページ", "page",
+                        "検索語句", "search term", "通話", "calls", "ルート", "directions",
+                        "ウェブサイト", "website", "ビジネス プロフィール", "business profile")
             scores = [sum(word in _clean_name(line) for word in keywords) for line in lines[:30]]
             header_row = scores.index(max(scores)) if scores and max(scores) else 0
             return pd.read_csv(io.StringIO("\n".join(lines[header_row:])), on_bad_lines="skip")
@@ -79,7 +85,9 @@ def _read_csv_bytes(raw: bytes) -> pd.DataFrame:
 
 def _find_header_row(preview: pd.DataFrame) -> int:
     keywords = ("クリック", "表示回数", "clicks", "impressions", "セッション", "sessions",
-                "ランディング", "landing page", "クエリ", "query", "ページ", "page")
+                "ランディング", "landing page", "クエリ", "query", "ページ", "page",
+                "検索語句", "search term", "通話", "calls", "ルート", "directions",
+                "ウェブサイト", "website", "ビジネス プロフィール", "business profile")
     best_row, best_score = 0, 0
     for index, row in preview.iterrows():
         values = " | ".join(_clean_name(x) for x in row.tolist() if pd.notna(x))
@@ -187,6 +195,26 @@ def normalize_ga4_files(uploaded_files) -> tuple[pd.DataFrame, list[str]]:
     return result, notes
 
 
+def normalize_gbp_files(uploaded_files) -> tuple[list[dict], list[str]]:
+    """GBPの書き出し形式が複数あっても、表構造を保ったままAIへ渡す。"""
+    datasets, notes = [], []
+    try:
+        tables = read_uploaded_tables(uploaded_files)
+    except Exception as exc:
+        return [], [f"GBPファイルを読み取れませんでした: {exc}"]
+    for source, frame in tables:
+        frame = frame.dropna(how="all").dropna(axis=1, how="all").copy()
+        frame = frame.loc[:, [not _clean_name(col).startswith("unnamed") for col in frame.columns]]
+        if frame.empty:
+            continue
+        frame.columns = [str(col).strip() for col in frame.columns]
+        rows = json.loads(frame.head(300).to_json(orient="records", force_ascii=False, date_format="iso"))
+        datasets.append({"source": source, "columns": list(frame.columns), "rows": rows})
+    if uploaded_files and not datasets:
+        notes.append("GBPファイル内に分析できる表データを見つけられませんでした。")
+    return datasets, notes
+
+
 def get_html(url: str, timeout=15):
     response = requests.get(url, headers={"User-Agent": UA}, timeout=timeout, allow_redirects=True)
     response.raise_for_status()
@@ -269,7 +297,8 @@ def compact_records(df: pd.DataFrame, sort_by: str, limit=80):
     return df.sort_values(sort_by, ascending=False).head(limit).round(4).to_dict("records")
 
 
-def build_prompt(url: str, crawl: list[dict], gsc: pd.DataFrame, ga4: pd.DataFrame) -> str:
+def build_prompt(url: str, crawl: list[dict], gsc: pd.DataFrame, ga4: pd.DataFrame,
+                 gbp_profile_name: str = "", gbp_data: list[dict] | None = None) -> str:
     gsc_low_ctr = []
     if not gsc.empty:
         candidates = gsc[(gsc.impressions >= 20) & (gsc.position <= 20)].copy()
@@ -281,6 +310,8 @@ def build_prompt(url: str, crawl: list[dict], gsc: pd.DataFrame, ga4: pd.DataFra
         "gsc_low_ctr_opportunities": gsc_low_ctr,
         "gsc_top": compact_records(gsc, "clicks", 80),
         "ga4_top_landing_pages": compact_records(ga4, "sessions", 80),
+        "gbp_profile_name": gbp_profile_name,
+        "gbp_performance_exports": gbp_data or [],
     }
     return f"""
 あなたは月間100万PVサイトを担当する、日本語SEOコンサルタント兼Webマーケターです。
@@ -296,6 +327,7 @@ def build_prompt(url: str, crawl: list[dict], gsc: pd.DataFrame, ga4: pd.DataFra
   "data_findings": [{{"finding":"事実", "evidence":"数値・URL", "impact":"影響"}}],
   "priorities": [{{"priority":"高/中/低", "issue":"課題", "action":"具体策", "kpi":"指標", "target":"目安", "effort":"小/中/大"}}],
   "rewrite_target": {{"url":"最優先URL", "reason":"選定理由", "direction":"リライト方針", "primary_keyword":"主軸KW", "secondary_keywords":["関連KW"]}},
+  "gbp_analysis": {{"summary":"GBPの重要な結論", "strengths":["強み"], "issues":["課題と根拠"], "actions":["優先順位付き改善策"], "post_ideas":["GBP投稿案"]}},
   "reader_problems": ["想定読者が抱える具体的な悩み"],
   "article_outline": [{{"heading":"H2見出し", "purpose":"狙い", "subheadings":["H3"]}}],
   "completed_article": "読者の検索意図を満たす完成本文。Markdown形式。タイトル、導入、H2/H3、まとめ、自然な予約・相談導線を含める。データにない店舗情報・料金・効果は創作しない。2,500〜4,000字程度",
@@ -358,11 +390,18 @@ with st.sidebar:
         accept_multiple_files=True,
         help="ランディングページのレポートをCSVまたはExcelで選択します。",
     )
+    gbp_files = st.file_uploader(
+        "Googleビジネスプロフィール（GBP）データ",
+        type=["csv", "xlsx", "xls"],
+        accept_multiple_files=True,
+        help="選択する店舗のGBPパフォーマンスや検索語句をダウンロードしたCSV／Excelを選択します。",
+    )
     st.caption("Googleの管理者権限やサービスアカウントは不要です。")
     with st.expander("ダウンロードするデータ"):
         st.markdown(
             "**Search Console**：検索結果のパフォーマンスで期間を指定し、右上の「エクスポート」からExcelがおすすめです。  \n"
             "**GA4**：レポート → エンゲージメント → ランディングページで、右上の共有アイコンからCSVをダウンロードします。"
+            "  \n**GBP**：Googleビジネスプロフィールのパフォーマンス画面から、検索語句や操作数のCSV／Excelをダウンロードします。"
         )
 
 st.title("PONTE SEO改善アプリ")
@@ -391,17 +430,25 @@ if analyze:
         try:
             gsc_df, gsc_notes = normalize_gsc_files(gsc_files)
             ga4_df, ga4_notes = normalize_ga4_files(ga4_files)
-            warnings.extend(gsc_notes + ga4_notes)
+            gbp_data, gbp_notes = normalize_gbp_files(gbp_files)
+            warnings.extend(gsc_notes + ga4_notes + gbp_notes)
         except Exception as exc:
             gsc_df, ga4_df = pd.DataFrame(), pd.DataFrame()
+            gbp_data = []
             warnings.append(f"アップロードデータを読み取れませんでした: {exc}")
         if gsc_df.empty:
             warnings.append("Search Consoleデータがないため、その部分は公開ページ情報だけで分析しました。")
         if ga4_df.empty:
             warnings.append("GA4データがないため、その部分は公開ページ情報だけで分析しました。")
+        gbp_profile_name = GBP_PROFILE_NAMES.get(selected_site, "")
+        if gbp_profile_name and not gbp_data:
+            warnings.append(f"{gbp_profile_name}のGBPデータがないため、GBP実績値の分析は省略しました。")
+        if not gbp_profile_name and gbp_data:
+            warnings.append("おすすめブログにはGBPがないため、アップロードされたGBPデータは分析対象外です。")
+            gbp_data = []
 
         progress.progress(60, text="SEO課題と改善優先度を分析しています…")
-        prompt = build_prompt(url, crawl, gsc_df, ga4_df)
+        prompt = build_prompt(url, crawl, gsc_df, ga4_df, gbp_profile_name, gbp_data)
         report = run_ai(api_key, model, prompt)
         progress.progress(100, text="分析が完了しました。")
         time.sleep(.2)
@@ -413,10 +460,11 @@ if analyze:
                 for warning in warnings:
                     st.warning(warning)
 
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("確認ページ", f"{sum('error' not in x for x in crawl)}件")
         c2.metric("GSCデータ", f"{len(gsc_df):,}行")
         c3.metric("GA4データ", f"{len(ga4_df):,}行")
+        c4.metric("GBPデータ", f"{sum(len(x.get('rows', [])) for x in gbp_data):,}行")
 
         st.subheader("最重要結論")
         st.info(report.get("executive_summary", ""))
@@ -428,6 +476,16 @@ if analyze:
             target = report.get("rewrite_target", {})
             if target:
                 st.markdown(f"**最優先リライト:** {target.get('url','')}  \n**理由:** {target.get('reason','')}  \n**方向性:** {target.get('direction','')}")
+
+        gbp_report = report.get("gbp_analysis", {})
+        if gbp_profile_name and gbp_report:
+            with st.expander(f"{gbp_profile_name}｜GBP分析", expanded=True):
+                st.info(gbp_report.get("summary", ""))
+                for title, key in (("強み", "strengths"), ("課題", "issues"),
+                                   ("優先して行う改善策", "actions"), ("GBP投稿案", "post_ideas")):
+                    st.markdown(f"**{title}**")
+                    for item in gbp_report.get(key, []):
+                        st.markdown(f"- {item}")
 
         st.header("想定読者の悩み")
         for item in report.get("reader_problems", []):

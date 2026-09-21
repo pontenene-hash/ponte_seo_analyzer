@@ -6,7 +6,7 @@
 - ぽんてアロマサロン（https://ponte-aroma.jp/）
 - ぽんておすすめブログ（https://ponte-nene.net/）
 
-1. Search Console・GA4からダウンロードしたCSV／Excelを読み込み
+1. Search Console・GA4・GBPからダウンロードしたCSV／Excelを読み込み
 2. 最大15ページの公開HTMLを技術SEO監査
 3. Geminiが改善優先度、リライト対象、構成、完成本文、30日計画を作成
 
@@ -42,7 +42,13 @@ Excelはクエリ・ページなど複数のシートを一度に読み込める
 
 アプリのサイドバーで、Search ConsoleとGA4のファイルを選びます。その後、3サイトから分析対象を選んで「分析する」を押してください。URLの手入力は不要です。
 
-## 5. Gemini APIキー
+## 5. GBPデータの準備
+
+ぽんて鍼灸整骨院またはぽんてアロマサロンを選ぶ場合は、対応するGoogleビジネスプロフィールのパフォーマンス画面から、検索語句・表示・電話・ルート・ウェブサイトクリックなどのデータをCSV／Excelでダウンロードし、サイドバーの「Googleビジネスプロフィール（GBP）データ」へ追加します。
+
+アプリは、選択したサイトに対応する店舗としてGBPを分析します。ぽんておすすめブログを選んだ場合、GBPデータは使用しません。
+
+## 6. Gemini APIキー
 
 Google AI StudioでAPIキーを発行し、Streamlit Secretsの`GEMINI_API_KEY`へ設定します。料金・無料枠・利用上限はGoogle側の最新表示を確認してください。
 
