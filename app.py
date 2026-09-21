@@ -40,6 +40,25 @@ GBP_PROFILE_NAMES = {
     "ぽんて鍼灸整骨院": "ぽんて鍼灸整骨院／ぽんてカイロプラクティックオフィス",
     "ぽんてアロマサロン": "Ponte Aroma Salon",
 }
+ANALYSIS_TARGETS = {
+    "ぽんて鍼灸整骨院（サイト）": {
+        "kind": "site", "url": SITE_OPTIONS["ぽんて鍼灸整骨院"], "name": "ぽんて鍼灸整骨院",
+    },
+    "ぽんてアロマサロン（サイト）": {
+        "kind": "site", "url": SITE_OPTIONS["ぽんてアロマサロン"], "name": "ぽんてアロマサロン",
+    },
+    "ぽんておすすめブログ（サイト）": {
+        "kind": "site", "url": SITE_OPTIONS["ぽんておすすめブログ"], "name": "ぽんておすすめブログ",
+    },
+    "ぽんて鍼灸整骨院（GBP）": {
+        "kind": "gbp", "url": SITE_OPTIONS["ぽんて鍼灸整骨院"], "name": "ぽんて鍼灸整骨院",
+        "gbp_profile_name": GBP_PROFILE_NAMES["ぽんて鍼灸整骨院"],
+    },
+    "ぽんてアロマサロン（GBP）": {
+        "kind": "gbp", "url": SITE_OPTIONS["ぽんてアロマサロン"], "name": "ぽんてアロマサロン",
+        "gbp_profile_name": GBP_PROFILE_NAMES["ぽんてアロマサロン"],
+    },
+}
 
 
 def secret(name: str, default=""):
@@ -298,13 +317,15 @@ def compact_records(df: pd.DataFrame, sort_by: str, limit=80):
 
 
 def build_prompt(url: str, crawl: list[dict], gsc: pd.DataFrame, ga4: pd.DataFrame,
-                 gbp_profile_name: str = "", gbp_data: list[dict] | None = None) -> str:
+                 gbp_profile_name: str = "", gbp_data: list[dict] | None = None,
+                 analysis_kind: str = "site") -> str:
     gsc_low_ctr = []
     if not gsc.empty:
         candidates = gsc[(gsc.impressions >= 20) & (gsc.position <= 20)].copy()
         gsc_low_ctr = compact_records(candidates, "impressions", 80)
     data = {
         "target_url": url,
+        "analysis_kind": analysis_kind,
         "period": "ユーザーがGoogle画面からダウンロードしたファイルの集計期間",
         "public_page_audit": crawl,
         "gsc_low_ctr_opportunities": gsc_low_ctr,
@@ -313,6 +334,25 @@ def build_prompt(url: str, crawl: list[dict], gsc: pd.DataFrame, ga4: pd.DataFra
         "gbp_profile_name": gbp_profile_name,
         "gbp_performance_exports": gbp_data or [],
     }
+    if analysis_kind == "gbp":
+        return f"""
+あなたは地域密着型店舗のGoogleビジネスプロフィール（GBP）運用を支援する、日本語MEOコンサルタントです。
+次のGBP実測データだけを根拠に、選択された店舗の表示機会と来店・問い合わせ行動を改善してください。
+数値にない事実を創作せず、医療・健康領域では断定、誇大表現、治癒保証を避けてください。
+今回はGBP専用分析です。サイトのSEOリライトやブログ記事は作成しないでください。
+
+分析データ:
+{json.dumps(data, ensure_ascii=False)}
+
+以下のJSONオブジェクトだけを返してください。Markdownコードフェンスは禁止です。
+{{
+  "executive_summary": "最重要結論（300字以内）",
+  "data_findings": [{{"finding":"事実", "evidence":"数値・検索語句・期間", "impact":"影響"}}],
+  "gbp_analysis": {{"summary":"GBPの重要な結論", "strengths":["強みと根拠"], "issues":["課題と根拠"], "actions":["優先順位付き改善策"], "post_ideas":["GBP投稿案"]}},
+  "next_30_days": [{{"week":"1週目", "task":"実施内容", "success":"完了条件"}}],
+  "measurement_notes": ["データ欠落や判断上の注意"]
+}}
+"""
     return f"""
 あなたは月間100万PVサイトを担当する、日本語SEOコンサルタント兼Webマーケターです。
 次の実測データだけを根拠に、地域密着型の鍼灸整骨院・アロマサロン・おすすめ情報サイトのいずれかを改善してください。
@@ -357,8 +397,20 @@ def run_ai(api_key: str, model: str, prompt: str) -> dict:
     return parse_json_response(response.text)
 
 
-def markdown_report(url: str, report: dict) -> str:
-    lines = [f"# SEO・マーケティング改善レポート\n\n対象: {url}\n", "## 最重要結論", report.get("executive_summary", "")]
+def markdown_report(target_label: str, url: str, report: dict, analysis_kind: str) -> str:
+    report_title = "GBP改善レポート" if analysis_kind == "gbp" else "SEO・マーケティング改善レポート"
+    lines = [f"# {report_title}\n\n対象: {target_label}\n\n関連サイト: {url}\n", "## 最重要結論", report.get("executive_summary", "")]
+    if analysis_kind == "gbp":
+        gbp_report = report.get("gbp_analysis", {})
+        lines += ["\n## GBP分析", gbp_report.get("summary", "")]
+        for title, key in (("強み", "strengths"), ("課題", "issues"),
+                           ("優先して行う改善策", "actions"), ("GBP投稿案", "post_ideas")):
+            lines.append(f"\n### {title}")
+            lines += [f"- {item}" for item in gbp_report.get(key, [])]
+        lines.append("\n## 30日間の実行計画")
+        for item in report.get("next_30_days", []):
+            lines.append(f"- **{item.get('week', '')}**：{item.get('task', '')}（完了条件：{item.get('success', '')}）")
+        return "\n".join(lines)
     lines += ["\n## 想定読者の悩み"] + [f"- {x}" for x in report.get("reader_problems", [])]
     lines += ["\n## 記事の構成案"]
     for x in report.get("article_outline", []):
@@ -405,14 +457,19 @@ with st.sidebar:
         )
 
 st.title("PONTE SEO改善アプリ")
-st.markdown('<p class="subtle">サイトの実測データから、改善案とリライト原稿をまとめて作成します。</p>', unsafe_allow_html=True)
+st.markdown('<p class="subtle">3サイトのSEO分析と、2店舗のGBP分析から選べます。</p>', unsafe_allow_html=True)
 
-selected_site = st.selectbox(
-    "分析するサイト",
-    options=list(SITE_OPTIONS),
-    format_func=lambda name: f"{name}（{urlparse(SITE_OPTIONS[name]).netloc}）",
+selected_target = st.selectbox(
+    "分析する対象",
+    options=list(ANALYSIS_TARGETS),
 )
-url_input = SITE_OPTIONS[selected_site]
+target = ANALYSIS_TARGETS[selected_target]
+analysis_kind = target["kind"]
+url_input = target["url"]
+if analysis_kind == "gbp":
+    st.caption("GBPのCSV／Excelをサイドバーにアップロードしてから分析してください。")
+else:
+    st.caption(f"対象URL：{urlparse(url_input).netloc}")
 analyze = st.button("分析する", type="primary", use_container_width=True)
 
 if analyze:
@@ -422,33 +479,38 @@ if analyze:
             st.error("サイドバーの「Gemini APIキー」を設定してください。")
             st.stop()
 
-        progress = st.progress(0, text="公開ページを確認しています…")
-        crawl = crawl_site(url)
+        first_message = "GBPデータを確認しています…" if analysis_kind == "gbp" else "公開ページを確認しています…"
+        progress = st.progress(0, text=first_message)
+        crawl = crawl_site(url) if analysis_kind == "site" else []
         progress.progress(30, text="アップロードデータを読み込んでいます…")
 
         warnings = []
+        gsc_df, ga4_df, gbp_data = pd.DataFrame(), pd.DataFrame(), []
+        gbp_profile_name = target.get("gbp_profile_name", "")
         try:
-            gsc_df, gsc_notes = normalize_gsc_files(gsc_files)
-            ga4_df, ga4_notes = normalize_ga4_files(ga4_files)
-            gbp_data, gbp_notes = normalize_gbp_files(gbp_files)
-            warnings.extend(gsc_notes + ga4_notes + gbp_notes)
+            if analysis_kind == "site":
+                gsc_df, gsc_notes = normalize_gsc_files(gsc_files)
+                ga4_df, ga4_notes = normalize_ga4_files(ga4_files)
+                warnings.extend(gsc_notes + ga4_notes)
+                if gsc_df.empty:
+                    warnings.append("Search Consoleデータがないため、その部分は公開ページ情報だけで分析しました。")
+                if ga4_df.empty:
+                    warnings.append("GA4データがないため、その部分は公開ページ情報だけで分析しました。")
+            else:
+                gbp_data, gbp_notes = normalize_gbp_files(gbp_files)
+                warnings.extend(gbp_notes)
         except Exception as exc:
-            gsc_df, ga4_df = pd.DataFrame(), pd.DataFrame()
-            gbp_data = []
             warnings.append(f"アップロードデータを読み取れませんでした: {exc}")
-        if gsc_df.empty:
-            warnings.append("Search Consoleデータがないため、その部分は公開ページ情報だけで分析しました。")
-        if ga4_df.empty:
-            warnings.append("GA4データがないため、その部分は公開ページ情報だけで分析しました。")
-        gbp_profile_name = GBP_PROFILE_NAMES.get(selected_site, "")
-        if gbp_profile_name and not gbp_data:
-            warnings.append(f"{gbp_profile_name}のGBPデータがないため、GBP実績値の分析は省略しました。")
-        if not gbp_profile_name and gbp_data:
-            warnings.append("おすすめブログにはGBPがないため、アップロードされたGBPデータは分析対象外です。")
-            gbp_data = []
+
+        if analysis_kind == "gbp" and not gbp_data:
+            progress.empty()
+            st.error(f"{gbp_profile_name}のGBPデータをアップロードしてください。")
+            st.stop()
 
         progress.progress(60, text="SEO課題と改善優先度を分析しています…")
-        prompt = build_prompt(url, crawl, gsc_df, ga4_df, gbp_profile_name, gbp_data)
+        if analysis_kind == "gbp":
+            progress.progress(60, text="GBPの強み・課題・改善優先度を分析しています…")
+        prompt = build_prompt(url, crawl, gsc_df, ga4_df, gbp_profile_name, gbp_data, analysis_kind)
         report = run_ai(api_key, model, prompt)
         progress.progress(100, text="分析が完了しました。")
         time.sleep(.2)
@@ -460,22 +522,27 @@ if analyze:
                 for warning in warnings:
                     st.warning(warning)
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("確認ページ", f"{sum('error' not in x for x in crawl)}件")
-        c2.metric("GSCデータ", f"{len(gsc_df):,}行")
-        c3.metric("GA4データ", f"{len(ga4_df):,}行")
-        c4.metric("GBPデータ", f"{sum(len(x.get('rows', [])) for x in gbp_data):,}行")
+        if analysis_kind == "gbp":
+            c1, c2 = st.columns(2)
+            c1.metric("分析対象", target["name"])
+            c2.metric("GBPデータ", f"{sum(len(x.get('rows', [])) for x in gbp_data):,}行")
+        else:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("確認ページ", f"{sum('error' not in x for x in crawl)}件")
+            c2.metric("GSCデータ", f"{len(gsc_df):,}行")
+            c3.metric("GA4データ", f"{len(ga4_df):,}行")
 
         st.subheader("最重要結論")
         st.info(report.get("executive_summary", ""))
 
-        with st.expander("SEO・マーケティング改善点", expanded=True):
-            priorities = pd.DataFrame(report.get("priorities", []))
-            if not priorities.empty:
-                st.dataframe(priorities, use_container_width=True, hide_index=True)
-            target = report.get("rewrite_target", {})
-            if target:
-                st.markdown(f"**最優先リライト:** {target.get('url','')}  \n**理由:** {target.get('reason','')}  \n**方向性:** {target.get('direction','')}")
+        if analysis_kind == "site":
+            with st.expander("SEO・マーケティング改善点", expanded=True):
+                priorities = pd.DataFrame(report.get("priorities", []))
+                if not priorities.empty:
+                    st.dataframe(priorities, use_container_width=True, hide_index=True)
+                rewrite_target = report.get("rewrite_target", {})
+                if rewrite_target:
+                    st.markdown(f"**最優先リライト:** {rewrite_target.get('url','')}  \n**理由:** {rewrite_target.get('reason','')}  \n**方向性:** {rewrite_target.get('direction','')}")
 
         gbp_report = report.get("gbp_analysis", {})
         if gbp_profile_name and gbp_report:
@@ -487,19 +554,20 @@ if analyze:
                     for item in gbp_report.get(key, []):
                         st.markdown(f"- {item}")
 
-        st.header("想定読者の悩み")
-        for item in report.get("reader_problems", []):
-            st.markdown(f"- {item}")
+        if analysis_kind == "site":
+            st.header("想定読者の悩み")
+            for item in report.get("reader_problems", []):
+                st.markdown(f"- {item}")
 
-        st.header("記事の構成案")
-        for section in report.get("article_outline", []):
-            st.subheader(section.get("heading", ""))
-            st.caption(section.get("purpose", ""))
-            for sub in section.get("subheadings", []):
-                st.markdown(f"- {sub}")
+            st.header("記事の構成案")
+            for section in report.get("article_outline", []):
+                st.subheader(section.get("heading", ""))
+                st.caption(section.get("purpose", ""))
+                for sub in section.get("subheadings", []):
+                    st.markdown(f"- {sub}")
 
-        st.header("完成した本文")
-        st.markdown(report.get("completed_article", ""))
+            st.header("完成した本文")
+            st.markdown(report.get("completed_article", ""))
 
         with st.expander("30日間の実行計画・分析根拠"):
             plan = pd.DataFrame(report.get("next_30_days", []))
@@ -511,8 +579,9 @@ if analyze:
             for note in report.get("measurement_notes", []):
                 st.caption(f"・{note}")
 
-        output = markdown_report(url, report)
-        st.download_button("レポートをダウンロード", output.encode("utf-8-sig"), "seo_improvement_report.md", "text/markdown", use_container_width=True)
+        output = markdown_report(selected_target, url, report, analysis_kind)
+        output_name = "gbp_improvement_report.md" if analysis_kind == "gbp" else "seo_improvement_report.md"
+        st.download_button("レポートをダウンロード", output.encode("utf-8-sig"), output_name, "text/markdown", use_container_width=True)
     except Exception as exc:
         st.error(f"分析を完了できませんでした: {exc}")
         st.caption("URL、Gemini APIキー、アップロードしたファイル形式をご確認ください。")
