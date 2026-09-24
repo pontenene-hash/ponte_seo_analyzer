@@ -29,6 +29,7 @@ CSS = """
 st.markdown(CSS, unsafe_allow_html=True)
 
 DEFAULT_MODEL = "gemini-3.6-flash"
+FALLBACK_MODELS = ("gemini-3.5-flash", "gemini-3.5-flash-lite")
 RETIRED_MODELS = {"gemini-2.5-flash", "models/gemini-2.5-flash"}
 UA = "PONTE-SEO-Analyzer/1.0 (+website quality audit)"
 SITE_OPTIONS = {
@@ -387,14 +388,43 @@ def parse_json_response(text: str) -> dict:
     return json.loads(cleaned[start:end + 1])
 
 
-def run_ai(api_key: str, model: str, prompt: str) -> dict:
-    client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config={"temperature": 0.25, "response_mime_type": "application/json"},
+def _can_try_another_model(exc: Exception) -> bool:
+    message = str(exc).lower()
+    retryable_words = (
+        "503", "unavailable", "high demand", "overloaded", "capacity",
+        "500", "502", "504", "timeout", "deadline_exceeded",
+        "404", "not_found", "no longer available",
     )
-    return parse_json_response(response.text)
+    return any(word in message for word in retryable_words)
+
+
+def run_ai(api_key: str, model: str, prompt: str) -> tuple[dict, str]:
+    client = genai.Client(api_key=api_key)
+    candidate_models = []
+    for candidate in (model, *FALLBACK_MODELS):
+        if candidate and candidate not in candidate_models:
+            candidate_models.append(candidate)
+
+    errors = []
+    for index, candidate in enumerate(candidate_models):
+        try:
+            response = client.models.generate_content(
+                model=candidate,
+                contents=prompt,
+                config={"temperature": 0.25, "response_mime_type": "application/json"},
+            )
+            return parse_json_response(response.text), candidate
+        except Exception as exc:
+            errors.append(exc)
+            if not _can_try_another_model(exc):
+                raise
+            if index < len(candidate_models) - 1:
+                time.sleep(2)
+
+    raise RuntimeError(
+        "Geminiが一時的に混み合っています。自動再試行でも接続できませんでした。"
+        "5〜10分ほど待ってから、もう一度「分析する」を押してください。"
+    ) from errors[-1]
 
 
 def markdown_report(target_label: str, url: str, report: dict, analysis_kind: str) -> str:
@@ -428,6 +458,7 @@ with st.sidebar:
     if configured_model in RETIRED_MODELS:
         configured_model = DEFAULT_MODEL
     model = st.text_input("Geminiモデル", value=configured_model)
+    st.caption("混雑時は別の安定モデルへ自動的に切り替えます。")
     st.divider()
     st.subheader("分析データ")
     gsc_files = st.file_uploader(
@@ -511,7 +542,9 @@ if analyze:
         if analysis_kind == "gbp":
             progress.progress(60, text="GBPの強み・課題・改善優先度を分析しています…")
         prompt = build_prompt(url, crawl, gsc_df, ga4_df, gbp_profile_name, gbp_data, analysis_kind)
-        report = run_ai(api_key, model, prompt)
+        report, used_model = run_ai(api_key, model, prompt)
+        if used_model != model:
+            warnings.append(f"{model}が混雑していたため、{used_model}へ自動切替して分析しました。")
         progress.progress(100, text="分析が完了しました。")
         time.sleep(.2)
         progress.empty()
@@ -583,5 +616,10 @@ if analyze:
         output_name = "gbp_improvement_report.md" if analysis_kind == "gbp" else "seo_improvement_report.md"
         st.download_button("レポートをダウンロード", output.encode("utf-8-sig"), output_name, "text/markdown", use_container_width=True)
     except Exception as exc:
-        st.error(f"分析を完了できませんでした: {exc}")
-        st.caption("URL、Gemini APIキー、アップロードしたファイル形式をご確認ください。")
+        error_text = str(exc)
+        if _can_try_another_model(exc):
+            st.error("Geminiが一時的に混み合っています。5〜10分後に、もう一度「分析する」を押してください。")
+            st.caption("URLやAPIキーの設定ミスではありません。入力やアップロードをやり直す必要もありません。")
+        else:
+            st.error(f"分析を完了できませんでした: {error_text}")
+            st.caption("Gemini APIキーと、アップロードしたファイル形式をご確認ください。")

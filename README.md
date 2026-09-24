@@ -56,6 +56,8 @@ Google AI StudioでAPIキーを発行し、Streamlit Secretsの`GEMINI_API_KEY`�
 
 モデルは`gemini-3.6-flash`を使用します。以前のSecretsに`gemini-2.5-flash`が残っていても、アプリが自動的に新しいモデルへ切り替えます。
 
+Gemini側が混雑して`503 UNAVAILABLE`になった場合は、`gemini-3.5-flash`、続いて`gemini-3.5-flash-lite`へ自動的に切り替えて分析します。すべて混雑している場合は、5〜10分後に再度「分析する」を押してください。
+
 ## ローカル起動
 
 ```bash
