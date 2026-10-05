@@ -4,13 +4,23 @@ import io
 import json
 import re
 import time
+from datetime import datetime
+from html import escape
+from pathlib import Path
 from urllib.parse import urljoin, urlparse
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 from google import genai
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
 
 st.set_page_config(page_title="PONTE SEO改善アプリ", page_icon="📈", layout="wide")
@@ -437,18 +447,88 @@ def markdown_report(target_label: str, url: str, report: dict, analysis_kind: st
                            ("優先して行う改善策", "actions"), ("GBP投稿案", "post_ideas")):
             lines.append(f"\n### {title}")
             lines += [f"- {item}" for item in gbp_report.get(key, [])]
-        lines.append("\n## 30日間の実行計画")
-        for item in report.get("next_30_days", []):
-            lines.append(f"- **{item.get('week', '')}**：{item.get('task', '')}（完了条件：{item.get('success', '')}）")
-        return "\n".join(lines)
-    lines += ["\n## 想定読者の悩み"] + [f"- {x}" for x in report.get("reader_problems", [])]
-    lines += ["\n## 記事の構成案"]
-    for x in report.get("article_outline", []):
-        lines.append(f"### {x.get('heading','')}")
-        lines.append(x.get("purpose", ""))
-        lines += [f"- {s}" for s in x.get("subheadings", [])]
-    lines += ["\n## 完成した本文", report.get("completed_article", "")]
+    else:
+        lines.append("\n## 改善優先度")
+        for item in report.get("priorities", []):
+            lines.append(f"- **{item.get('priority', '')}** {item.get('issue', '')}：{item.get('action', '')} "
+                         f"（指標：{item.get('kpi', '')}／目安：{item.get('target', '')}／工数：{item.get('effort', '')}）")
+        rewrite = report.get("rewrite_target", {})
+        if rewrite:
+            lines += ["\n## 最優先リライト", f"URL：{rewrite.get('url', '')}",
+                      f"理由：{rewrite.get('reason', '')}", f"方向性：{rewrite.get('direction', '')}",
+                      f"主軸キーワード：{rewrite.get('primary_keyword', '')}",
+                      f"関連キーワード：{', '.join(rewrite.get('secondary_keywords', []))}"]
+        lines += ["\n## 想定読者の悩み"] + [f"- {x}" for x in report.get("reader_problems", [])]
+        lines += ["\n## 記事の構成案"]
+        for item in report.get("article_outline", []):
+            lines.append(f"### {item.get('heading', '')}")
+            lines.append(item.get("purpose", ""))
+            lines += [f"- {s}" for s in item.get("subheadings", [])]
+        lines += ["\n## 完成した本文", report.get("completed_article", "")]
+
+    lines.append("\n## 30日間の実行計画")
+    for item in report.get("next_30_days", []):
+        lines.append(f"- **{item.get('week', '')}**：{item.get('task', '')}（完了条件：{item.get('success', '')}）")
+    lines.append("\n## 分析根拠")
+    for item in report.get("data_findings", []):
+        lines.append(f"- {item.get('finding', '')}（根拠：{item.get('evidence', '')}／影響：{item.get('impact', '')}）")
+    lines.append("\n## 分析上の注意")
+    lines += [f"- {note}" for note in report.get("measurement_notes", [])]
     return "\n".join(lines)
+
+
+def report_pdf(markdown: str) -> bytes:
+    """Markdownレポート全体を日本語のA4 PDFへ変換する。"""
+    font = "PonteNotoSansJP"
+    if font not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont(font, str(Path(__file__).parent / "assets" / "NotoSansJP-Regular.ttf")))
+    styles = getSampleStyleSheet()
+    base = dict(fontName=font, wordWrap="CJK", textColor=colors.HexColor("#293241"))
+    heading = {
+        1: ParagraphStyle("ReportTitle", parent=styles["Normal"], fontSize=19, leading=27, spaceAfter=15, **base),
+        2: ParagraphStyle("ReportSection", parent=styles["Normal"], fontSize=13, leading=20, spaceBefore=14, spaceAfter=7, **base),
+        3: ParagraphStyle("ReportSubsection", parent=styles["Normal"], fontSize=11, leading=17, spaceBefore=9, spaceAfter=5, **base),
+    }
+    body = ParagraphStyle("ReportBody", parent=styles["Normal"], fontSize=9.5, leading=16, spaceAfter=5, **base)
+    bullet = ParagraphStyle("ReportBullet", parent=body, leftIndent=12, firstLineIndent=-10)
+    story = []
+
+    for line in markdown.splitlines():
+        value = line.strip()
+        if not value:
+            story.append(Spacer(1, 4))
+            continue
+        level = len(value) - len(value.lstrip("#"))
+        if 1 <= level <= 3 and value[level:level + 1] == " ":
+            story.append(Paragraph(escape(value[level + 1:]), heading[level]))
+            continue
+        is_bullet = value.startswith("- ")
+        if is_bullet:
+            value = value[2:]
+        # PDFの全本文に同じ内容を入れ、Markdown装飾だけを表示用に除く。
+        value = re.sub(r"\*\*(.*?)\*\*", r"\1", value)
+        value = re.sub(r"^#{1,3}\s+", "", value)
+        story.append(Paragraph(("・" if is_bullet else "") + escape(value), bullet if is_bullet else body))
+
+    output = io.BytesIO()
+    def add_footer(canvas, document):
+        canvas.saveState()
+        canvas.setFont(font, 8)
+        canvas.setFillColor(colors.HexColor("#64748b"))
+        canvas.drawCentredString(A4[0] / 2, 28, str(document.page))
+        canvas.restoreState()
+
+    document = SimpleDocTemplate(output, pagesize=A4, leftMargin=43, rightMargin=43,
+                                 topMargin=42, bottomMargin=45, title="PONTE 分析レポート")
+    document.build(story, onFirstPage=add_footer, onLaterPages=add_footer)
+    return output.getvalue()
+
+
+def report_filename(target: dict, extension: str) -> str:
+    date = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d")
+    kind = "GBP" if target["kind"] == "gbp" else "サイト"
+    safe_name = re.sub(r"[^\w\u3040-\u30ff\u3400-\u9fff-]", "_", target["name"])
+    return f"{safe_name}_{kind}_{date}.{extension}"
 
 
 with st.sidebar:
@@ -613,8 +693,14 @@ if analyze:
                 st.caption(f"・{note}")
 
         output = markdown_report(selected_target, url, report, analysis_kind)
-        output_name = "gbp_improvement_report.md" if analysis_kind == "gbp" else "seo_improvement_report.md"
-        st.download_button("レポートをダウンロード", output.encode("utf-8-sig"), output_name, "text/markdown", use_container_width=True)
+        pdf_data = report_pdf(output)
+        pdf_col, text_col = st.columns(2)
+        with pdf_col:
+            st.download_button("PDFでダウンロード", pdf_data, report_filename(target, "pdf"),
+                               "application/pdf", use_container_width=True)
+        with text_col:
+            st.download_button("Markdownでダウンロード", output.encode("utf-8-sig"),
+                               report_filename(target, "md"), "text/markdown", use_container_width=True)
     except Exception as exc:
         error_text = str(exc)
         if _can_try_another_model(exc):

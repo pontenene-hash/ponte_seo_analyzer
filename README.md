@@ -58,6 +58,12 @@ Google AI StudioでAPIキーを発行し、Streamlit Secretsの`GEMINI_API_KEY`�
 
 Gemini側が混雑して`503 UNAVAILABLE`になった場合は、`gemini-3.5-flash`、続いて`gemini-3.5-flash-lite`へ自動的に切り替えて分析します。すべて混雑している場合は、5〜10分後に再度「分析する」を押してください。
 
+## 7. レポートのダウンロード
+
+分析後に「PDFでダウンロード」または「Markdownでダウンロード」を押します。両形式とも選択したサイト名・店舗名、分析種別、日本の日付がファイル名に入ります（例：`ぽんて鍼灸整骨院_サイト_2026-10-05.pdf`）。PDFはA4で日本語の本文・改善計画・分析根拠を含みます。
+
+PDF用の日本語フォントは`assets/NotoSansJP-Regular.ttf`です。GitHubへ更新する際は`app.py`、`requirements.txt`と一緒に`assets`フォルダもアップロードしてください。フォントのライセンスは`assets/OFL.txt`にあります。
+
 ## ローカル起動
 
 ```bash

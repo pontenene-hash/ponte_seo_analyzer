@@ -6,3 +6,4 @@ lxml>=5.3,<7
 google-genai>=1.0,<2
 openpyxl>=3.1,<4
 xlrd>=2.0,<3
+reportlab>=4.2,<5
