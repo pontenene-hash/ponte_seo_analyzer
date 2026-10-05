@@ -19,6 +19,7 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
@@ -481,7 +482,19 @@ def report_pdf(markdown: str) -> bytes:
     """Markdownレポート全体を日本語のA4 PDFへ変換する。"""
     font = "PonteNotoSansJP"
     if font not in pdfmetrics.getRegisteredFontNames():
-        pdfmetrics.registerFont(TTFont(font, str(Path(__file__).parent / "assets" / "NotoSansJP-Regular.ttf")))
+        app_dir = Path(__file__).parent
+        font_candidates = (
+            app_dir / "NotoSansJP-Regular.ttf",
+            app_dir / "assets" / "NotoSansJP-Regular.ttf",
+        )
+        font_path = next((path for path in font_candidates if path.exists()), None)
+        if font_path:
+            pdfmetrics.registerFont(TTFont(font, str(font_path)))
+        else:
+            # フォントをアップロードし忘れた場合も、PDF作成自体は止めない。
+            font = "HeiseiKakuGo-W5"
+            if font not in pdfmetrics.getRegisteredFontNames():
+                pdfmetrics.registerFont(UnicodeCIDFont(font))
     styles = getSampleStyleSheet()
     base = dict(fontName=font, wordWrap="CJK", textColor=colors.HexColor("#293241"))
     heading = {

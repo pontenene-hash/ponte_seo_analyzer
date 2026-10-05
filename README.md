@@ -62,7 +62,7 @@ Gemini側が混雑して`503 UNAVAILABLE`になった場合は、`gemini-3.5-fla
 
 分析後に「PDFでダウンロード」または「Markdownでダウンロード」を押します。両形式とも選択したサイト名・店舗名、分析種別、日本の日付がファイル名に入ります（例：`ぽんて鍼灸整骨院_サイト_2026-10-05.pdf`）。PDFはA4で日本語の本文・改善計画・分析根拠を含みます。
 
-PDF用の日本語フォントは`assets/NotoSansJP-Regular.ttf`です。GitHubへ更新する際は`app.py`、`requirements.txt`と一緒に`assets`フォルダもアップロードしてください。フォントのライセンスは`assets/OFL.txt`にあります。
+PDF用の日本語フォントは、アプリと同じ階層に置く`NotoSansJP-Regular.ttf`です。GitHubへ更新する際は`app.py`、`requirements.txt`、`NotoSansJP-Regular.ttf`を同じ場所へアップロードしてください。フォントがない場合もアプリは停止せず、内蔵の代替フォントでPDFを作成します。フォントのライセンスは`OFL.txt`にあります。
 
 ## ローカル起動
 
