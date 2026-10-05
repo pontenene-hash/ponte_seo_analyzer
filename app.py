@@ -544,6 +544,110 @@ def report_filename(target: dict, extension: str) -> str:
     return f"{safe_name}_{kind}_{date}.{extension}"
 
 
+def render_saved_result(saved: dict) -> None:
+    """セッションに保存した分析結果を、再実行後も同じ状態で表示する。"""
+    target = saved["target"]
+    report = saved["report"]
+    analysis_kind = saved["analysis_kind"]
+    crawl = saved["crawl"]
+    gsc_rows = saved["gsc_rows"]
+    ga4_rows = saved["ga4_rows"]
+    gbp_rows = saved["gbp_rows"]
+    gbp_profile_name = saved["gbp_profile_name"]
+
+    st.success("分析が完了しました")
+    st.caption(f"表示中の分析結果：{saved['selected_target']}")
+    if saved["warnings"]:
+        with st.expander("データ連携のお知らせ"):
+            for warning in saved["warnings"]:
+                st.warning(warning)
+
+    if analysis_kind == "gbp":
+        c1, c2 = st.columns(2)
+        c1.metric("分析対象", target["name"])
+        c2.metric("GBPデータ", f"{gbp_rows:,}行")
+    else:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("確認ページ", f"{sum('error' not in x for x in crawl)}件")
+        c2.metric("GSCデータ", f"{gsc_rows:,}行")
+        c3.metric("GA4データ", f"{ga4_rows:,}行")
+
+    st.subheader("最重要結論")
+    st.info(report.get("executive_summary", ""))
+
+    if analysis_kind == "site":
+        with st.expander("SEO・マーケティング改善点", expanded=True):
+            priorities = pd.DataFrame(report.get("priorities", []))
+            if not priorities.empty:
+                st.dataframe(priorities, use_container_width=True, hide_index=True)
+            rewrite_target = report.get("rewrite_target", {})
+            if rewrite_target:
+                st.markdown(
+                    f"**最優先リライト:** {rewrite_target.get('url','')}  \n"
+                    f"**理由:** {rewrite_target.get('reason','')}  \n"
+                    f"**方向性:** {rewrite_target.get('direction','')}"
+                )
+
+    gbp_report = report.get("gbp_analysis", {})
+    if gbp_profile_name and gbp_report:
+        with st.expander(f"{gbp_profile_name}｜GBP分析", expanded=True):
+            st.info(gbp_report.get("summary", ""))
+            for title, key in (("強み", "strengths"), ("課題", "issues"),
+                               ("優先して行う改善策", "actions"), ("GBP投稿案", "post_ideas")):
+                st.markdown(f"**{title}**")
+                for item in gbp_report.get(key, []):
+                    st.markdown(f"- {item}")
+
+    if analysis_kind == "site":
+        st.header("想定読者の悩み")
+        for item in report.get("reader_problems", []):
+            st.markdown(f"- {item}")
+
+        st.header("記事の構成案")
+        for section in report.get("article_outline", []):
+            st.subheader(section.get("heading", ""))
+            st.caption(section.get("purpose", ""))
+            for sub in section.get("subheadings", []):
+                st.markdown(f"- {sub}")
+
+        st.header("完成した本文")
+        st.markdown(report.get("completed_article", ""))
+
+    with st.expander("30日間の実行計画・分析根拠"):
+        plan = pd.DataFrame(report.get("next_30_days", []))
+        if not plan.empty:
+            st.dataframe(plan, use_container_width=True, hide_index=True)
+        findings = pd.DataFrame(report.get("data_findings", []))
+        if not findings.empty:
+            st.dataframe(findings, use_container_width=True, hide_index=True)
+        for note in report.get("measurement_notes", []):
+            st.caption(f"・{note}")
+
+    st.subheader("レポートをダウンロード")
+    st.caption("一方をダウンロードした後も結果は保持され、続けてもう一方をダウンロードできます。")
+    pdf_col, text_col = st.columns(2)
+    with pdf_col:
+        st.download_button(
+            "PDFでダウンロード",
+            saved["pdf_data"],
+            saved["pdf_filename"],
+            "application/pdf",
+            use_container_width=True,
+            on_click="ignore",
+            key="download_pdf",
+        )
+    with text_col:
+        st.download_button(
+            "Markdownでダウンロード",
+            saved["markdown_data"],
+            saved["markdown_filename"],
+            "text/markdown",
+            use_container_width=True,
+            on_click="ignore",
+            key="download_markdown",
+        )
+
+
 with st.sidebar:
     st.header("初回設定")
     api_key = st.text_input("Gemini APIキー", value=secret("GEMINI_API_KEY", ""), type="password")
@@ -642,78 +746,24 @@ if analyze:
         time.sleep(.2)
         progress.empty()
 
-        st.success("分析が完了しました")
-        if warnings:
-            with st.expander("データ連携のお知らせ"):
-                for warning in warnings:
-                    st.warning(warning)
-
-        if analysis_kind == "gbp":
-            c1, c2 = st.columns(2)
-            c1.metric("分析対象", target["name"])
-            c2.metric("GBPデータ", f"{sum(len(x.get('rows', [])) for x in gbp_data):,}行")
-        else:
-            c1, c2, c3 = st.columns(3)
-            c1.metric("確認ページ", f"{sum('error' not in x for x in crawl)}件")
-            c2.metric("GSCデータ", f"{len(gsc_df):,}行")
-            c3.metric("GA4データ", f"{len(ga4_df):,}行")
-
-        st.subheader("最重要結論")
-        st.info(report.get("executive_summary", ""))
-
-        if analysis_kind == "site":
-            with st.expander("SEO・マーケティング改善点", expanded=True):
-                priorities = pd.DataFrame(report.get("priorities", []))
-                if not priorities.empty:
-                    st.dataframe(priorities, use_container_width=True, hide_index=True)
-                rewrite_target = report.get("rewrite_target", {})
-                if rewrite_target:
-                    st.markdown(f"**最優先リライト:** {rewrite_target.get('url','')}  \n**理由:** {rewrite_target.get('reason','')}  \n**方向性:** {rewrite_target.get('direction','')}")
-
-        gbp_report = report.get("gbp_analysis", {})
-        if gbp_profile_name and gbp_report:
-            with st.expander(f"{gbp_profile_name}｜GBP分析", expanded=True):
-                st.info(gbp_report.get("summary", ""))
-                for title, key in (("強み", "strengths"), ("課題", "issues"),
-                                   ("優先して行う改善策", "actions"), ("GBP投稿案", "post_ideas")):
-                    st.markdown(f"**{title}**")
-                    for item in gbp_report.get(key, []):
-                        st.markdown(f"- {item}")
-
-        if analysis_kind == "site":
-            st.header("想定読者の悩み")
-            for item in report.get("reader_problems", []):
-                st.markdown(f"- {item}")
-
-            st.header("記事の構成案")
-            for section in report.get("article_outline", []):
-                st.subheader(section.get("heading", ""))
-                st.caption(section.get("purpose", ""))
-                for sub in section.get("subheadings", []):
-                    st.markdown(f"- {sub}")
-
-            st.header("完成した本文")
-            st.markdown(report.get("completed_article", ""))
-
-        with st.expander("30日間の実行計画・分析根拠"):
-            plan = pd.DataFrame(report.get("next_30_days", []))
-            if not plan.empty:
-                st.dataframe(plan, use_container_width=True, hide_index=True)
-            findings = pd.DataFrame(report.get("data_findings", []))
-            if not findings.empty:
-                st.dataframe(findings, use_container_width=True, hide_index=True)
-            for note in report.get("measurement_notes", []):
-                st.caption(f"・{note}")
-
         output = markdown_report(selected_target, url, report, analysis_kind)
         pdf_data = report_pdf(output)
-        pdf_col, text_col = st.columns(2)
-        with pdf_col:
-            st.download_button("PDFでダウンロード", pdf_data, report_filename(target, "pdf"),
-                               "application/pdf", use_container_width=True)
-        with text_col:
-            st.download_button("Markdownでダウンロード", output.encode("utf-8-sig"),
-                               report_filename(target, "md"), "text/markdown", use_container_width=True)
+        st.session_state["analysis_result"] = {
+            "selected_target": selected_target,
+            "target": dict(target),
+            "analysis_kind": analysis_kind,
+            "report": report,
+            "warnings": list(warnings),
+            "crawl": crawl,
+            "gsc_rows": len(gsc_df),
+            "ga4_rows": len(ga4_df),
+            "gbp_rows": sum(len(x.get("rows", [])) for x in gbp_data),
+            "gbp_profile_name": gbp_profile_name,
+            "pdf_data": pdf_data,
+            "pdf_filename": report_filename(target, "pdf"),
+            "markdown_data": output.encode("utf-8-sig"),
+            "markdown_filename": report_filename(target, "md"),
+        }
     except Exception as exc:
         error_text = str(exc)
         if _can_try_another_model(exc):
@@ -722,3 +772,7 @@ if analyze:
         else:
             st.error(f"分析を完了できませんでした: {error_text}")
             st.caption("Gemini APIキーと、アップロードしたファイル形式をご確認ください。")
+
+saved_result = st.session_state.get("analysis_result")
+if saved_result:
+    render_saved_result(saved_result)
