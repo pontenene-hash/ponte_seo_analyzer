@@ -328,6 +328,47 @@ def compact_records(df: pd.DataFrame, sort_by: str, limit=80):
     return df.sort_values(sort_by, ascending=False).head(limit).round(4).to_dict("records")
 
 
+ACTIONABLE_REPORT_RULES = """
+あなたはマーケティングと実行支援のプロです。読者はIT初心者の店舗運営者です。
+目的は順位やアクセスだけでなく、適切な新規客の問い合わせ・予約・来店につなげることです。
+【具体化の必須ルール】
+- 「SEOを強化」「導線を改善」「情報を充実」だけでは不可。最初に行う3つを順序付きで示す。
+- 用語は平易な日本語で説明する。CTRは検索結果が表示されたうちクリックされた割合、など。
+- 各施策は対象ページURLまたはGBPの編集項目、理由、操作手順3〜7段階、文案例、完了確認、担当、作業時間の目安を必須とする。
+- 管理画面やCMSは未確認なので、WordPressと断定しない。画面名は一般的な案内・表示が異なる可能性を示す。設定できない時は制作会社への依頼文を用意する。
+- サイトは検索語句→対象ページ→予約・相談までの流れで優先度を判断する。タイトル/説明文、サービス説明、内部リンク、予約導線を根拠に応じて選ぶ。未取得の本文・ボタン・料金等を「存在しない」と断定しない。
+- GBPは検索語句と表示・電話・ルート・サイトクリック等の実測を分けて判断する。基本情報・カテゴリ・サービス・写真・投稿・予約リンクは未確認なら確認作業として提案し、現在の欠落を断定しない。投稿回数を増やすだけで順位が上がると約束しない。
+- 問い合わせ率を閲覧数やクリック数だけから推測しない。電話クリックやルート検索を来店人数として扱わない。順位・集客成果を保証しない。
+- 実測事実、仮説、推奨施策を明確に区別する。取得していない検索順位・競合・期間・店舗情報・効果・予約URLを創作しない。
+- 同じ期間・同じ集計粒度のデータだけ比較し、クエリ別とページ別の件数を足して総計にしない。データ不足なら確認手順と取得すべきデータを示す。
+- 指標は現在値（未取得なら未取得）、改善目安（仮の目標と明記）、確認画面、確認時期、改善しない場合の次の手を示す。
+- 30日計画は実施・動作確認・初期計測の計画とする。効果判断は短期間で断定せず、変動や季節性も確認する。
+- 無料で自分で行える施策を優先する。有料作業や権限が必要な作業は明示する。編集前のバックアップと公開後のスマホ確認を含める。
+- 口コミ依頼は実際の利用者に公平に行う。高評価限定の依頼、特典と引換え、架空口コミ、キーワードを強制した口コミ文案を禁止する。
+- 医療・健康分野は治癒保証・断定・誇大な効果表現を避ける。文案の料金や営業時間等は［要確認］の置換箇所として明示する。
+【出力の追加必須項目】
+指定JSONへ次の3項目を必ず追加する（既存項目も省略しない）。
+"first_three_actions": ["最初に行うこと1：対象と具体的な作業", "2：具体的な作業", "3：具体的な作業"],
+"implementation_guide": [
+  {"title":"施策名", "priority":"高/中/低", "target":"実在する対象URLまたは編集項目",
+   "evidence":"実測根拠または仮説・要確認の明記", "goal":"集客につながる理由",
+   "owner":"自分／制作会社など", "time_estimate":"作業時間の目安", "requirements":"権限・費用・事前確認",
+   "steps":["開く画面と操作", "変更する内容", "保存とスマホ動作確認"],
+   "copy_example":"参考にできるタイトル・説明文・予約案内・投稿等の文案。不要なら不要と理由",
+   "completion_check":"何を見て完了と判断するか", "help_request":"できない場合に担当者へ送る依頼文"}
+],
+"measurement_plan": [
+  {"metric":"指標と初心者向けの意味", "baseline":"現在値または未取得",
+   "provisional_target":"保証ではない仮目標／まず基準値を測る",
+   "where_to_check":"確認する画面と操作", "when":"実装直後／毎週／効果検証時期",
+   "next_if_no_change":"改善しない時の具体的な次の手"}
+]
+implementation_guideは重要な施策4〜6件。量より実行可能性を優先し、最低1件は予約・問い合わせ導線の確認と改善を含める。
+GBP専用分析ではサイト記事リライトを含めず、GBPの予約・サイトへのリンク等の導線確認を扱う。
+"""
+
+
+
 def build_prompt(url: str, crawl: list[dict], gsc: pd.DataFrame, ga4: pd.DataFrame,
                  gbp_profile_name: str = "", gbp_data: list[dict] | None = None,
                  analysis_kind: str = "site") -> str:
@@ -352,6 +393,7 @@ def build_prompt(url: str, crawl: list[dict], gsc: pd.DataFrame, ga4: pd.DataFra
 次のGBP実測データだけを根拠に、選択された店舗の表示機会と来店・問い合わせ行動を改善してください。
 数値にない事実を創作せず、医療・健康領域では断定、誇大表現、治癒保証を避けてください。
 今回はGBP専用分析です。サイトのSEOリライトやブログ記事は作成しないでください。
+{ACTIONABLE_REPORT_RULES}
 
 分析データ:
 {json.dumps(data, ensure_ascii=False)}
@@ -369,6 +411,7 @@ def build_prompt(url: str, crawl: list[dict], gsc: pd.DataFrame, ga4: pd.DataFra
 あなたは月間100万PVサイトを担当する、日本語SEOコンサルタント兼Webマーケターです。
 次の実測データだけを根拠に、地域密着型の鍼灸整骨院・アロマサロン・おすすめ情報サイトのいずれかを改善してください。
 医療・健康領域では断定、誇大表現、治癒保証を避け、一次情報の確認が必要な点を明記してください。
+{ACTIONABLE_REPORT_RULES}
 
 分析データ:
 {json.dumps(data, ensure_ascii=False)}
@@ -438,9 +481,47 @@ def run_ai(api_key: str, model: str, prompt: str) -> tuple[dict, str]:
     ) from errors[-1]
 
 
+def actionable_report_markdown(report: dict) -> str:
+    """画面とダウンロードで共通の、初心者向け実行指示書。"""
+    lines = []
+    first_actions = report.get("first_three_actions", [])
+    if first_actions:
+        lines.append("## まず取り組む3つの作業")
+        lines.extend(f"- {action}" for action in first_actions)
+    guide = report.get("implementation_guide", [])
+    if guide:
+        lines.append("\n## 初心者向け・具体的な実行手順")
+    for index, item in enumerate(guide, 1):
+        lines.append(f"\n### 作業{index}：{item.get('title', '')}")
+        for label, key in (("優先度", "priority"), ("変更・確認する場所", "target"),
+                           ("根拠・確認が必要な点", "evidence"), ("集客につながる理由", "goal"),
+                           ("担当", "owner"), ("作業時間の目安", "time_estimate"),
+                           ("権限・費用・事前確認", "requirements")):
+            lines.append(f"- {label}：{item.get(key, '')}")
+        lines.append("\n操作手順：")
+        for step_index, step in enumerate(item.get("steps", []), 1):
+            lines.append(f"- 手順{step_index}：{step}")
+        for label, key in (("変更する文案・参考例", "copy_example"),
+                           ("完了の確認方法", "completion_check"),
+                           ("自分でできない場合の依頼文", "help_request")):
+            lines.extend([f"\n{label}：", str(item.get(key, ""))])
+    measurement = report.get("measurement_plan", [])
+    if measurement:
+        lines.append("\n## 集客につながったかを確認する方法")
+    for item in measurement:
+        lines.append(f"\n### {item.get('metric', '')}")
+        for label, key in (("現在値", "baseline"), ("仮の目標", "provisional_target"),
+                           ("確認する場所と操作", "where_to_check"), ("確認時期", "when"),
+                           ("改善しない場合の次の手", "next_if_no_change")):
+            lines.append(f"- {label}：{item.get(key, '')}")
+    return "\n".join(lines)
+
+
+
 def markdown_report(target_label: str, url: str, report: dict, analysis_kind: str) -> str:
     report_title = "GBP改善レポート" if analysis_kind == "gbp" else "SEO・マーケティング改善レポート"
     lines = [f"# {report_title}\n\n対象: {target_label}\n\n関連サイト: {url}\n", "## 最重要結論", report.get("executive_summary", "")]
+    lines.append(actionable_report_markdown(report))
     if analysis_kind == "gbp":
         gbp_report = report.get("gbp_analysis", {})
         lines += ["\n## GBP分析", gbp_report.get("summary", "")]
@@ -574,6 +655,11 @@ def render_saved_result(saved: dict) -> None:
 
     st.subheader("最重要結論")
     st.info(report.get("executive_summary", ""))
+
+    instructions = actionable_report_markdown(report)
+    if instructions:
+        st.markdown(instructions)
+        st.caption("改善目標は保証ではありません。公開前に店舗情報を確認し、公開後は予約までの操作をスマホで試してください。")
 
     if analysis_kind == "site":
         with st.expander("SEO・マーケティング改善点", expanded=True):
