@@ -4,10 +4,10 @@ import io
 import json
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -78,6 +78,181 @@ def secret(name: str, default=""):
         return st.secrets.get(name, default)
     except Exception:
         return default
+
+
+def google_json(method: str, endpoint: str, access_token: str, **kwargs) -> dict:
+    """ログインユーザーの短命トークンだけを使って読み取り専用APIを呼ぶ。"""
+    response = requests.request(
+        method, endpoint, headers={"Authorization": f"Bearer {access_token}"},
+        timeout=25, **kwargs,
+    )
+    if not response.ok:
+        # リクエストやトークンを画面・ログに出さない。
+        code = response.status_code
+        if code == 401:
+            raise ValueError("Google接続の有効期限が切れました。Googleからログアウトし、再接続してください。")
+        if code == 403:
+            raise ValueError("このGoogleアカウントには対象データの閲覧権限がないか、Google CloudでAPIが有効ではありません。")
+        raise ValueError(f"Googleからデータを取得できませんでした（HTTP {code}）。")
+    return response.json()
+
+
+def available_gsc_sites(token: str) -> list[str]:
+    result = google_json("GET", "https://www.googleapis.com/webmasters/v3/sites", token)
+    return [row["siteUrl"] for row in result.get("siteEntry", [])
+            if row.get("permissionLevel") != "siteUnverifiedUser" and row.get("siteUrl")]
+
+
+def available_ga4_properties(token: str) -> dict[str, str]:
+    properties, page_token = {}, None
+    while True:
+        params = {"pageSize": 200}
+        if page_token:
+            params["pageToken"] = page_token
+        result = google_json("GET", "https://analyticsadmin.googleapis.com/v1beta/accountSummaries",
+                             token, params=params)
+        for account in result.get("accountSummaries", []):
+            for prop in account.get("propertySummaries", []):
+                prop_id = prop.get("property", "").removeprefix("properties/")
+                if prop_id.isdigit():
+                    properties[prop_id] = f"{prop.get('displayName', prop_id)}（{prop_id}）"
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            return properties
+
+
+def available_gbp_locations(token: str) -> dict[str, dict]:
+    """ログインユーザーが管理できる店舗を一覧表示する。"""
+    locations, page_token = {}, None
+    while True:
+        params = {"readMask": "name,title,websiteUri", "pageSize": 100}
+        if page_token:
+            params["pageToken"] = page_token
+        result = google_json("GET", "https://mybusinessbusinessinformation.googleapis.com/v1/accounts/-/locations",
+                             token, params=params)
+        for location in result.get("locations", []):
+            name = location.get("name", "")
+            if re.fullmatch(r"locations/\d+", name):
+                locations[name] = {"title": location.get("title", name),
+                                   "website": location.get("websiteUri", "")}
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            return locations
+
+
+def fetch_gbp(token: str, location_name: str, start, end) -> tuple[list[dict], list[str]]:
+    """パフォーマンスAPIから行動指標と検索語句を収集する。変更APIは呼ばない。"""
+    if not re.fullmatch(r"locations/\d+", location_name):
+        raise ValueError("正しいGBP店舗を選択してください。")
+    endpoint = f"https://businessprofileperformance.googleapis.com/v1/{location_name}"
+    metrics = (
+        "BUSINESS_IMPRESSIONS_DESKTOP_MAPS", "BUSINESS_IMPRESSIONS_MOBILE_MAPS",
+        "BUSINESS_IMPRESSIONS_DESKTOP_SEARCH", "BUSINESS_IMPRESSIONS_MOBILE_SEARCH",
+        "BUSINESS_DIRECTION_REQUESTS", "CALL_CLICKS", "WEBSITE_CLICKS",
+    )
+    params = [("dailyMetrics", metric) for metric in metrics]
+    for key, day in (("start", start), ("end", end)):
+        for part in ("year", "month", "day"):
+            params.append((f"dailyRange.{key}_date.{part}", getattr(day, part)))
+    performance = google_json("GET", f"{endpoint}:fetchMultiDailyMetricsTimeSeries", token, params=params)
+    monthly = {}
+    for group in performance.get("multiDailyMetricTimeSeries", []):
+        for series in group.get("dailyMetricTimeSeries", []):
+            metric = series.get("dailyMetric", "")
+            if metric not in metrics:
+                continue
+            for point in series.get("timeSeries", {}).get("datedValues", []):
+                date = point.get("date", {})
+                month = f"{int(date.get('year', 0)):04d}-{int(date.get('month', 0)):02d}"
+                if month.startswith("0000"):
+                    continue
+                monthly[month, metric] = monthly.get((month, metric), 0) + int(point.get("value", 0))
+    metric_rows = [{"month": month, "metric": metric, "count": count}
+                   for (month, metric), count in sorted(monthly.items())]
+    notes = []
+    keyword_rows = []
+    # 検索語句は月単位の集計。未確定の当月を避け、直近の完了済み3か月を使う。
+    first_day = end.replace(day=1)
+    last_complete = first_day - timedelta(days=1)
+    second_complete = (last_complete.replace(day=1) - timedelta(days=1)).replace(day=1)
+    first_complete = (second_complete - timedelta(days=1)).replace(day=1)
+    keyword_params = {"monthlyRange.start_month.year": first_complete.year,
+                      "monthlyRange.start_month.month": first_complete.month,
+                      "monthlyRange.end_month.year": last_complete.year,
+                      "monthlyRange.end_month.month": last_complete.month,
+                      "pageSize": 100}
+    try:
+        for _ in range(3):
+            result = google_json("GET", f"{endpoint}/searchkeywords/impressions/monthly",
+                                 token, params=keyword_params)
+            for item in result.get("searchKeywordsCounts", []):
+                value = item.get("insightsValue", {})
+                keyword_rows.append({"search_keyword": item.get("searchKeyword", ""),
+                                     "impressions": value.get("value"),
+                                     "less_than": value.get("threshold")})
+            page_token = result.get("nextPageToken")
+            if not page_token:
+                break
+            keyword_params["pageToken"] = page_token
+        else:
+            notes.append("検索語句は最大300件まで取得しました。")
+    except (ValueError, requests.RequestException) as exc:
+        notes.append(f"検索語句の取得に失敗しました：{exc}。日別指標は分析できます。")
+    datasets = [
+        {"source": f"GBPパフォーマンスAPI（月別集計：{start}〜{end}）",
+         "columns": ["month", "metric", "count"], "rows": metric_rows},
+        {"source": f"GBP検索語句API（{first_complete:%Y-%m}〜{last_complete:%Y-%m}、閾値は正確な件数ではない）",
+         "columns": ["search_keyword", "impressions", "less_than"], "rows": keyword_rows},
+    ]
+    return [dataset for dataset in datasets if dataset["rows"]], notes
+
+
+def site_matches(site_url: str, target_url: str) -> bool:
+    target_host = urlparse(target_url).hostname or ""
+    if site_url.startswith("sc-domain:"):
+        domain = site_url.removeprefix("sc-domain:").lower()
+        return target_host == domain or target_host.endswith("." + domain)
+    return target_url.startswith(site_url)
+
+
+def fetch_gsc(token: str, site_url: str, start: str, end: str) -> pd.DataFrame:
+    rows = []
+    endpoint = f"https://www.googleapis.com/webmasters/v3/sites/{quote(site_url, safe='')}/searchAnalytics/query"
+    for dimension in ("query", "page"):
+        result = google_json("POST", endpoint, token, json={
+            "startDate": start, "endDate": end, "dimensions": [dimension],
+            "type": "web", "rowLimit": 1000,
+        })
+        for item in result.get("rows", []):
+            rows.append({"query": item["keys"][0] if dimension == "query" else "",
+                         "page": item["keys"][0] if dimension == "page" else "",
+                         "clicks": item.get("clicks", 0),
+                         "impressions": item.get("impressions", 0),
+                         "ctr": item.get("ctr", 0), "position": item.get("position", 0),
+                         "source": f"Search Console API（{dimension}、各上位1000件）"})
+    return pd.DataFrame(rows, columns=["query", "page", "clicks", "impressions", "ctr", "position", "source"])
+
+
+def fetch_ga4(token: str, property_id: str, start: str, end: str) -> pd.DataFrame:
+    if not property_id.isdigit():
+        raise ValueError("GA4プロパティIDは数字で指定してください。")
+    endpoint = f"https://analyticsdata.googleapis.com/v1beta/properties/{property_id}:runReport"
+    result = google_json("POST", endpoint, token, json={
+        "dateRanges": [{"startDate": start, "endDate": end}],
+        "dimensions": [{"name": "landingPagePlusQueryString"}],
+        "metrics": [{"name": name} for name in ("sessions", "activeUsers", "engagementRate", "keyEvents")],
+        "limit": "1000", "orderBys": [{"metric": {"metricName": "sessions"}, "desc": True}],
+    })
+    rows = []
+    for item in result.get("rows", []):
+        values = item.get("metricValues", [])
+        def metric(index: int) -> float:
+            return float(values[index].get("value", 0)) if len(values) > index else 0
+        rows.append({"landing_page": item["dimensionValues"][0]["value"],
+                     "sessions": metric(0), "active_users": metric(1),
+                     "engagement_rate": metric(2), "key_events": metric(3),
+                     "source": "GA4 Data API（上位1000ページ）"})
+    return pd.DataFrame(rows, columns=["landing_page", "sessions", "active_users", "engagement_rate", "key_events", "source"])
 
 
 def normalize_url(value: str) -> str:
@@ -371,7 +546,7 @@ GBP専用分析ではサイト記事リライトを含めず、GBPの予約・�
 
 def build_prompt(url: str, crawl: list[dict], gsc: pd.DataFrame, ga4: pd.DataFrame,
                  gbp_profile_name: str = "", gbp_data: list[dict] | None = None,
-                 analysis_kind: str = "site") -> str:
+                 analysis_kind: str = "site", period_label: str = "アップロードファイルの集計期間") -> str:
     gsc_low_ctr = []
     if not gsc.empty:
         candidates = gsc[(gsc.impressions >= 20) & (gsc.position <= 20)].copy()
@@ -379,7 +554,7 @@ def build_prompt(url: str, crawl: list[dict], gsc: pd.DataFrame, ga4: pd.DataFra
     data = {
         "target_url": url,
         "analysis_kind": analysis_kind,
-        "period": "ユーザーがGoogle画面からダウンロードしたファイルの集計期間",
+        "period": period_label,
         "public_page_audit": crawl,
         "gsc_low_ctr_opportunities": gsc_low_ctr,
         "gsc_top": compact_records(gsc, "clicks", 80),
@@ -744,6 +919,8 @@ with st.sidebar:
     st.caption("混雑時は別の安定モデルへ自動的に切り替えます。")
     st.divider()
     st.subheader("分析データ")
+    data_source = st.radio("データ取得方法", ["Googleから直接取得", "CSV／Excelをアップロード"],
+                           index=1, help="Google接続と対象APIの準備ができたら直接取得を選べます。")
     gsc_files = st.file_uploader(
         "Search Consoleデータ",
         type=["csv", "xlsx", "xls"],
@@ -762,7 +939,7 @@ with st.sidebar:
         accept_multiple_files=True,
         help="選択する店舗のGBPパフォーマンスや検索語句をダウンロードしたCSV／Excelを選択します。",
     )
-    st.caption("Googleの管理者権限やサービスアカウントは不要です。")
+    st.caption("直接取得にはGoogle接続が必要です。GBPの直接取得はGoogleによるGBP API利用承認も必要です。")
     with st.expander("ダウンロードするデータ"):
         st.markdown(
             "**Search Console**：検索結果のパフォーマンスで期間を指定し、右上の「エクスポート」からExcelがおすすめです。  \n"
@@ -781,9 +958,90 @@ target = ANALYSIS_TARGETS[selected_target]
 analysis_kind = target["kind"]
 url_input = target["url"]
 if analysis_kind == "gbp":
-    st.caption("GBPのCSV／Excelをサイドバーにアップロードしてから分析してください。")
+    st.caption("GBPの店舗を選び、Googleから取得するかCSV／Excelをアップロードして分析できます。")
 else:
     st.caption(f"対象URL：{urlparse(url_input).netloc}")
+direct_mode = data_source == "Googleから直接取得"
+google_logged_in = False
+selected_gsc_site = ""
+selected_ga_property = ""
+selected_gbp_location = ""
+if direct_mode:
+    st.subheader("Googleのデータを直接取得")
+    auth_configured = bool(secret("auth", {}))
+    if not auth_configured:
+        st.warning("Google接続の初回設定がまだです。READMEの手順に沿ってOAuth設定を行うか、サイドバーでファイル読込を選んでください。")
+    else:
+        google_logged_in = st.user.is_logged_in
+        if not google_logged_in:
+            if st.button("Googleアカウントで接続", key="google_login"):
+                st.login()
+        else:
+            st.caption("Googleアカウントに接続済み。読み取り専用で取得します。")
+            if st.button("Googleからログアウト", key="google_logout"):
+                st.session_state.pop("google_sources", None)
+                st.logout()
+            token = st.user.tokens.get("access")
+            if not token:
+                st.error("Googleのアクセストークンが取得できません。[auth] の expose_tokens = 'access' と読み取りスコープを確認してください。")
+            elif st.button("接続できるプロパティを表示", key="load_google_sources"):
+                sources = {"user": st.user.get("email", ""), "sites": [], "properties": {},
+                           "locations": {}, "errors": []}
+                if analysis_kind == "site":
+                    try:
+                        sources["sites"] = available_gsc_sites(token)
+                    except (ValueError, requests.RequestException) as exc:
+                        sources["errors"].append(f"サーチコンソール：{exc}")
+                    try:
+                        sources["properties"] = available_ga4_properties(token)
+                    except (ValueError, requests.RequestException) as exc:
+                        sources["errors"].append(f"GA4一覧：{exc} プロパティIDの手入力もできます。")
+                else:
+                    try:
+                        sources["locations"] = available_gbp_locations(token)
+                    except (ValueError, requests.RequestException) as exc:
+                        sources["errors"].append(f"GBP店舗一覧：{exc} Google CloudのGBP API利用承認と権限を確認してください。")
+                st.session_state["google_sources"] = sources
+
+            sources = st.session_state.get("google_sources", {})
+            if sources.get("user") == st.user.get("email", ""):
+                for issue in sources.get("errors", []):
+                    st.warning(issue)
+                if analysis_kind == "site":
+                    sites = [site for site in sources.get("sites", []) if site_matches(site, url_input)]
+                    if sites:
+                        selected_gsc_site = st.selectbox("このサイトのSearch Consoleプロパティ", sites,
+                                                         key=f"gsc_{urlparse(url_input).hostname}")
+                    else:
+                        st.caption("このサイトのSearch Consoleプロパティが見つかりません。別アカウントか閲覧権限を確認してください。")
+                    props = sources.get("properties", {})
+                    if props:
+                        selected_ga_property = st.selectbox("このサイトのGA4プロパティ", list(props),
+                                                            format_func=lambda pid: props[pid],
+                                                            key=f"ga4_{urlparse(url_input).hostname}")
+                else:
+                    locations = sources.get("locations", {})
+                    if locations:
+                        selected_gbp_location = st.selectbox(
+                            "分析するGBP店舗（名称とウェブサイトを確認）",
+                            ["", *locations],
+                            format_func=lambda name: (
+                                f"{locations[name]['title']}｜{locations[name]['website']}（{name}）"
+                                if name else "店舗を選択してください"),
+                            key=f"gbp_{target['name']}",
+                        )
+                    else:
+                        st.caption("GBP店舗が見つかりません。APIの利用承認、店舗の管理権限、Googleアカウントを確認してください。")
+            if analysis_kind == "site":
+                manual_ga4 = st.text_input("GA4プロパティIDを直接指定（一覧にない場合）", value="",
+                                           key=f"ga4_manual_{urlparse(url_input).hostname}")
+                if manual_ga4.strip():
+                    selected_ga_property = manual_ga4.strip()
+                st.caption("対象サイトに対応するGA4プロパティを選んでください。別サイトを選ぶと分析結果が混ざります。")
+            else:
+                st.caption("Googleから選んだ店舗が分析対象と同じか、名称とウェブサイトを確認してください。")
+    st.caption("取得期間：直近90日間から直近3日を除いた期間。GBP検索語句は完了済みの直近3か月分です。" if analysis_kind == "gbp" else
+               "取得期間：直近90日間から直近3日を除いた期間。サーチコンソールの反映遅延を考慮します。")
 analyze = st.button("分析する", type="primary", use_container_width=True)
 
 if analyze:
@@ -796,35 +1054,79 @@ if analyze:
         first_message = "GBPデータを確認しています…" if analysis_kind == "gbp" else "公開ページを確認しています…"
         progress = st.progress(0, text=first_message)
         crawl = crawl_site(url) if analysis_kind == "site" else []
-        progress.progress(30, text="アップロードデータを読み込んでいます…")
+        progress.progress(30, text="Googleデータを取得しています…" if direct_mode else "アップロードデータを読み込んでいます…")
 
         warnings = []
+        period_label = "アップロードファイルの集計期間（アプリ側では未確認）"
         gsc_df, ga4_df, gbp_data = pd.DataFrame(), pd.DataFrame(), []
         gbp_profile_name = target.get("gbp_profile_name", "")
         try:
             if analysis_kind == "site":
-                gsc_df, gsc_notes = normalize_gsc_files(gsc_files)
-                ga4_df, ga4_notes = normalize_ga4_files(ga4_files)
-                warnings.extend(gsc_notes + ga4_notes)
+                if direct_mode:
+                    if not google_logged_in:
+                        raise ValueError("先にGoogleアカウントで接続してください。")
+                    token = st.user.tokens.get("access")
+                    if not token:
+                        raise ValueError("Googleのアクセストークンがありません。接続設定を確認してください。")
+                    today = datetime.now(ZoneInfo("Asia/Tokyo")).date()
+                    start, end = (today - timedelta(days=90)).isoformat(), (today - timedelta(days=3)).isoformat()
+                    period_label = f"Google API：{start}〜{end}（日本時間を基準に選択）"
+                    warnings.append(f"Googleデータの取得期間：{start}〜{end}。上位1000行ずつを取得しました。")
+                    if selected_gsc_site:
+                        try:
+                            gsc_df = fetch_gsc(token, selected_gsc_site, start, end)
+                        except (ValueError, requests.RequestException) as exc:
+                            warnings.append(f"Search Consoleの取得に失敗：{exc}")
+                    if selected_ga_property:
+                        try:
+                            ga4_df = fetch_ga4(token, selected_ga_property, start, end)
+                        except (ValueError, requests.RequestException) as exc:
+                            warnings.append(f"GA4の取得に失敗：{exc}")
+                else:
+                    gsc_df, gsc_notes = normalize_gsc_files(gsc_files)
+                    ga4_df, ga4_notes = normalize_ga4_files(ga4_files)
+                    warnings.extend(gsc_notes + ga4_notes)
                 if gsc_df.empty:
                     warnings.append("Search Consoleデータがないため、その部分は公開ページ情報だけで分析しました。")
                 if ga4_df.empty:
                     warnings.append("GA4データがないため、その部分は公開ページ情報だけで分析しました。")
             else:
-                gbp_data, gbp_notes = normalize_gbp_files(gbp_files)
-                warnings.extend(gbp_notes)
+                if direct_mode:
+                    if not google_logged_in:
+                        raise ValueError("先にGoogleアカウントで接続してください。")
+                    if not selected_gbp_location:
+                        raise ValueError("分析対象に対応するGBP店舗を選択してください。")
+                    chosen = st.session_state.get("google_sources", {}).get("locations", {}).get(selected_gbp_location, {})
+                    chosen_host = urlparse(chosen.get("website", "")).hostname
+                    expected_host = urlparse(url_input).hostname
+                    if chosen_host and chosen_host.removeprefix("www.") != expected_host.removeprefix("www."):
+                        raise ValueError("選択したGBP店舗のウェブサイトが、この分析対象と一致しません。店舗を選び直してください。")
+                    token = st.user.tokens.get("access")
+                    if not token:
+                        raise ValueError("Googleのアクセストークンがありません。ログアウトし、再接続してください。")
+                    today = datetime.now(ZoneInfo("Asia/Tokyo")).date()
+                    start_day, end_day = today - timedelta(days=90), today - timedelta(days=3)
+                    period_label = f"GBPパフォーマンスAPI：{start_day}〜{end_day}。検索語句はデータ内の完了済み月。"
+                    gbp_data, gbp_notes = fetch_gbp(token, selected_gbp_location, start_day, end_day)
+                    warnings.extend(gbp_notes)
+                else:
+                    gbp_data, gbp_notes = normalize_gbp_files(gbp_files)
+                    warnings.extend(gbp_notes)
         except Exception as exc:
-            warnings.append(f"アップロードデータを読み取れませんでした: {exc}")
+            warnings.append(f"分析データを取得できませんでした: {exc}")
 
         if analysis_kind == "gbp" and not gbp_data:
             progress.empty()
-            st.error(f"{gbp_profile_name}のGBPデータをアップロードしてください。")
+            st.error(f"{gbp_profile_name}のGBPデータを取得できませんでした。" if direct_mode else
+                     f"{gbp_profile_name}のGBPデータをアップロードしてください。")
+            for warning in warnings:
+                st.warning(warning)
             st.stop()
 
         progress.progress(60, text="SEO課題と改善優先度を分析しています…")
         if analysis_kind == "gbp":
             progress.progress(60, text="GBPの強み・課題・改善優先度を分析しています…")
-        prompt = build_prompt(url, crawl, gsc_df, ga4_df, gbp_profile_name, gbp_data, analysis_kind)
+        prompt = build_prompt(url, crawl, gsc_df, ga4_df, gbp_profile_name, gbp_data, analysis_kind, period_label)
         report, used_model = run_ai(api_key, model, prompt)
         if used_model != model:
             warnings.append(f"{model}が混雑していたため、{used_model}へ自動切替して分析しました。")
