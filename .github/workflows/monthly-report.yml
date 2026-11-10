@@ -1,0 +1,47 @@
+name: PONTE monthly reports
+on:
+  schedule:
+    - cron: '17 9 10 * *'
+      timezone: Asia/Tokyo
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ponte-monthly-report
+  cancel-in-progress: false
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Analyze and save reports
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          GSC_NENE: https://ponte-nene.jp/
+          GSC_AROMA: https://ponte-aroma.jp/
+          GSC_BLOG: https://ponte-nene.net/
+          GA4_NENE: '467525819'
+          GA4_AROMA: '396664637'
+          GA4_BLOG: '524917273'
+          GBP_NENE: ${{ vars.GBP_NENE }}
+          GBP_AROMA: ${{ vars.GBP_AROMA }}
+          DRIVE_FOLDER_ID: ${{ vars.DRIVE_FOLDER_ID }}
+          REPORT_EMAIL_TO: ${{ vars.REPORT_EMAIL_TO }}
+        run: python monthly_report.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: monthly-reports
+          path: monthly_reports/
+          if-no-files-found: ignore
+          retention-days: 30
