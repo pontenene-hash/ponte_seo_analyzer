@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import date, timedelta
 from email.message import EmailMessage
 from io import BytesIO
@@ -15,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from google import genai
+from google.genai import errors as genai_errors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
@@ -169,10 +171,21 @@ def analysis(name, kind, start, end, compact):
 4. 4週間の実施予定、5. 次月に確認するKPIと比較条件、6. 要確認事項。
 分析データ: {json.dumps(compact, ensure_ascii=False, separators=(',', ':'))}"""
     model = os.environ.get("GEMINI_MODEL", "").strip() or "gemini-3.6-flash"
-    response = client.models.generate_content(model=model, contents=prompt)
-    if not response.text:
-        raise RuntimeError("Geminiの回答が空です。")
-    return response.text
+    # The SDK retries short outages internally; these longer gaps cover outages
+    # that persist beyond its built-in retry window.
+    for attempt, delay in enumerate((0, 15, 45, 90), start=1):
+        if delay:
+            time.sleep(delay)
+        try:
+            response = client.models.generate_content(model=model, contents=prompt)
+            if not response.text:
+                raise RuntimeError("Geminiの回答が空です。")
+            return response.text
+        except genai_errors.ServerError:
+            if attempt == 4:
+                raise
+            print(f"Gemini一時エラー: {name}（{kind}）、再試行します（{attempt}/3）。",
+                  file=sys.stderr)
 
 
 def make_pdf(title, markdown):
